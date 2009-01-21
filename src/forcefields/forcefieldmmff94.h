@@ -75,26 +75,13 @@ namespace OpenBabel
       template<bool> void Compute();
   };
 
-  class OBFFVDWCalculationMMFF94 : public OBFFCalculation2
-  {
-    public:
-      int aDA, bDA; // hydrogen donor/acceptor (A=1, D=2, neither=0)
-      double rab, epsilon, alpha_a, alpha_b, Na, Nb, Aa, Ab, Ga, Gb;
-      double R_AB, R_AB7/*, erep, erep7, eattr*/;
-
-      template<bool> void Compute();
-  };
-
-  class OBFFElectrostaticCalculationMMFF94 : public OBFFCalculation2
-  {
-    public:
-      double qq, rab;
-
-      template<bool> void Compute();
-  };
-
   // Class OBForceFieldMMFF94
   // class introduction in forcefieldmmff94.cpp
+  
+  class OBNbrList;
+  class OneFourList;
+  class VdwLookupTable;
+  class ElectrostaticLookupTable;
   class OBForceFieldMMFF94: public OBForceField
   {
     protected:
@@ -120,6 +107,7 @@ namespace OpenBabel
       bool SetTypes();
       //! fill OBFFXXXCalculation vectors
       bool SetupCalculations();
+      bool SetupNonBonded();
       //! Setup pointers in OBFFXXXCalculation vectors
       bool SetupPointers();
       //!  Sets formal charges
@@ -220,10 +208,15 @@ namespace OpenBabel
       std::vector<OBFFStrBndCalculationMMFF94>        _strbndcalculations;
       std::vector<OBFFTorsionCalculationMMFF94>       _torsioncalculations;
       std::vector<OBFFOOPCalculationMMFF94>           _oopcalculations;
-      std::vector<OBFFVDWCalculationMMFF94>           _vdwcalculations;
-      std::vector<OBFFElectrostaticCalculationMMFF94> _electrostaticcalculations;
 
       bool mmff94s;
+ 
+      std::vector<int>          m_atomTypes; 
+      OBNbrList                *m_vdwNbrList;
+      OBNbrList                *m_eleNbrList;
+      VdwLookupTable           *m_vdwTable;
+      ElectrostaticLookupTable *m_eleTable;
+      OneFourList              *m_oneFourList;
       
     public:
       //! Constructor
@@ -231,7 +224,7 @@ namespace OpenBabel
       {
         _init = false;
         _rvdw = 7.0;
-        _rele = 15.0;
+        _rele = 12.0;
         _pairfreq = 15;
         _cutoff = false;
         _linesearch = LineSearchType::Simple;
@@ -242,6 +235,12 @@ namespace OpenBabel
           mmff94s = false;
           _parFile = std::string("mmff94.ff");
 	}
+
+        m_vdwNbrList = 0;
+        m_eleNbrList = 0;
+        m_vdwTable = 0;
+        m_eleTable = 0;
+        m_oneFourList = 0;
       }
       
       //! Destructor

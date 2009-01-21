@@ -34,11 +34,252 @@ GNU General Public License for more details.
 
 #include <iomanip>
 #include "forcefieldmmff94.h"
+#include "obnbrlist.h"
+
+#include <Eigen/Core>
 
 using namespace std;
 
 namespace OpenBabel
 {
+
+  class OneFourList
+  {
+    public:
+      OneFourList(OBMol *mol)
+      {
+        m_pairs.resize(mol->NumAtoms());
+
+        FOR_ATOMS_OF_MOL (atom, mol) {
+          FOR_NBORS_OF_ATOM (nbr1, &*atom) {
+            FOR_NBORS_OF_ATOM (nbr2, &*nbr1) {
+              if (atom->GetIdx() == nbr2->GetIdx())
+                continue;
+              FOR_NBORS_OF_ATOM (nbr3, &*nbr2) {
+                if (nbr1->GetIdx() == nbr3->GetIdx())
+                  continue;
+
+                m_pairs[atom->GetIdx()-1].push_back(nbr3->GetIdx());
+                m_pairs[nbr3->GetIdx()-1].push_back(atom->GetIdx());
+              }
+            }
+          }
+        }
+    
+      }
+
+      bool IsOneFour(unsigned int i, unsigned int j)
+      {
+        --i;
+        std::vector<unsigned int>::iterator iter;
+        for (iter = m_pairs[i].begin(); iter != m_pairs[i].end(); ++iter)
+          if (*iter == j)
+            return true;
+
+        return false;
+      }
+    private:
+      std::vector<std::vector<unsigned int> > m_pairs;
+  };
+
+  class ElectrostaticLookupTable
+  {
+    public:
+      ElectrostaticLookupTable(int scale, double rcut) : m_scale(scale)
+      {
+        rcut += 1.0;
+        double inv_scale = 1.0 / scale;
+        
+        m_values.resize(scale * rcut * rcut);
+        m_dE.resize(scale * rcut * rcut);
+        for (unsigned int i = 0; i < m_values.size(); ++i) {
+          double r2 = inv_scale * i;
+          double r = sqrt(r2);
+          // energy
+          m_values[i] = 332.0716 / (r + 0.05);
+          // dE
+          m_dE[i] = -332.0716 / (r2 * r);
+        }
+
+        //cout << "----- ElectrostaticLookupTable -----" << endl;
+        //cout << "    scale = " << scale << "  rcut = " << rcut << endl;
+        //cout << "    size = " << 2 * m_values.size() * sizeof(double) << endl;
+      }
+
+      double value(double r2) const
+      {
+        // Minimization requires the energy be a continues function so 
+        // we use linear interpolation for energy values.
+        double alpha = r2 * m_scale;
+        const unsigned int index = floor(alpha);
+        alpha -= index;
+        return m_values.at(index) + alpha * (m_values.at(index+1) - m_values.at(index));
+      }
+
+      double dE(double r2) const
+      {
+        // Use direct lookup for dE, faster
+        const unsigned int index = floor(r2 * m_scale);
+        return m_dE.at(index);
+      }
+
+    private:
+      double                    m_scale;
+      std::vector<double>       m_values;  
+      std::vector<double>       m_dE;  
+  };
+
+  class VdwLookupTable
+  {
+    public:
+      VdwLookupTable(const std::vector<int> &uniqueTypes, const std::vector<OBFFParameter> &vdwParameters, 
+          int scale, double rcut) : m_scale(scale)
+      {
+        rcut += 1.0;
+        double inv_scale = 1.0 / scale;
+        m_parameters = vdwParameters;
+
+        for (unsigned int i = 0; i < uniqueTypes.size(); ++i) {
+          for (unsigned int j = 0; j < uniqueTypes.size(); ++j) {
+            OBFFParameter *parameter_a = findParameter(uniqueTypes[i]);
+            OBFFParameter *parameter_b = findParameter(uniqueTypes[j]);
+            if (!parameter_a || !parameter_b) {
+              continue;
+            }
+
+            const double alpha_a = parameter_a->_dpar[0];
+            const double Na      = parameter_a->_dpar[1];
+            const double Aa      = parameter_a->_dpar[2];
+            const double Ga      = parameter_a->_dpar[3];
+            const double aDA     = parameter_a->_ipar[0];
+      
+            const double alpha_b = parameter_b->_dpar[0];
+            const double Nb      = parameter_b->_dpar[1];
+            const double Ab      = parameter_b->_dpar[2];
+            const double Gb      = parameter_b->_dpar[3];
+            const double bDA     = parameter_b->_ipar[0];
+      
+            //these calculations only need to be done once for each pair, 
+            //we do them now and save them for later use
+            double R_AA, R_BB, g_AB, g_AB2, epsilon;
+            double R_AB, R_AB2, R_AB4, R_AB6, R_AB7, sqrt_a, sqrt_b;
+ 
+            R_AA = Aa * pow(alpha_a, 0.25);
+            R_BB = Ab * pow(alpha_b, 0.25);
+            sqrt_a = sqrt(alpha_a / Na);
+            sqrt_b = sqrt(alpha_b / Nb);
+      
+            if ((aDA == 1) || (bDA == 1)) { // hydrogen bond donor
+              R_AB = 0.5 * (R_AA + R_BB);
+              R_AB2 = R_AB * R_AB;
+              R_AB4 = R_AB2 * R_AB2;
+              R_AB6 = R_AB4 * R_AB2;
+        
+              if (aDA + bDA == 3) { // hydrogen bond acceptor
+                epsilon = 0.5 * (181.16 * Ga * Gb * alpha_a * alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
+                // R_AB is scaled to 0.8 for D-A interactions. The value used in the calculation of epsilon is not scaled. 
+                R_AB = 0.8 * R_AB;
+              } else
+                epsilon = (181.16 * Ga * Gb * alpha_a * alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
+	
+              R_AB2 = R_AB * R_AB;
+              R_AB4 = R_AB2 * R_AB2;
+              R_AB6 = R_AB4 * R_AB2;
+              R_AB7 = R_AB6 * R_AB;
+            } else {
+              g_AB = (R_AA - R_BB) / ( R_AA + R_BB);
+              g_AB2 = g_AB * g_AB;
+              R_AB =  0.5 * (R_AA + R_BB) * (1.0 + 0.2 * (1.0 - exp(-12.0 * g_AB2)));
+              R_AB2 = R_AB * R_AB;
+              R_AB4 = R_AB2 * R_AB2;
+              R_AB6 = R_AB4 * R_AB2;
+              R_AB7 = R_AB6 * R_AB;
+              epsilon = (181.16 * Ga * Gb * alpha_a * alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
+            }
+            
+            unsigned int k = key(uniqueTypes[i], uniqueTypes[j]);
+            
+            m_values[k].resize(scale * rcut * rcut);
+            for (unsigned int l = 0; l < m_values[k].size(); ++l) {
+              const double r2 = inv_scale * l;
+              const double r = sqrt(r2);
+              const double rab7 = r2 * r2 * r2 * r;
+              const double erep = (1.07 * R_AB) / (r + 0.07 * R_AB);
+              const double erep7 = erep*erep*erep*erep*erep*erep*erep;
+              const double eattr = (((1.12 * R_AB7) / (rab7 + 0.12 * R_AB7)) - 2.0);
+              m_values[k][l] = epsilon * erep7 * eattr;
+            }
+            
+            m_dE[k].resize(scale * rcut * rcut);
+            for (unsigned int l = 0; l < m_dE[k].size(); ++l) {
+              const double r2 = inv_scale * l;
+              const double r = sqrt(r2);
+              const double q = r / R_AB;
+              const double q6 = q*q*q*q*q*q;
+              const double q7 = q6 * q;
+              const double erep = 1.07 / (q + 0.07); 
+              const double erep7 = erep*erep*erep*erep*erep*erep*erep;
+              const double term = q7 + 0.12;
+              const double term2 = term * term;
+              const double eattr = (-7.84 * q6) / term2 + ((-7.84 / term) + 14) / (q + 0.07);
+              // devide by r here, this way we don't need to normalize the force in E_VDW
+              m_dE[k][l] = (epsilon * erep7 * eattr) / (R_AB * r);
+            }
+          }
+        }
+        
+        //cout << "----- VdwLookupTable -----" << endl;
+        //cout << "    scale = " << scale << "  rcut = " << rcut << endl;
+        //cout << "    # unique types = " << uniqueTypes.size() << endl;
+        //cout << "    size = " << 2 * uniqueTypes.size() * rcut * rcut * scale * sizeof(double) << endl; 
+      }
+
+      double value(int Ti, int Tj, double r2) const
+      {
+        const unsigned int k = key(Ti, Tj);
+        double alpha = r2 * m_scale;
+        const unsigned int index = floor(alpha);
+        alpha -= index;
+        return m_values.at(k).at(index) + alpha * (m_values.at(k).at(index+1) - m_values.at(k).at(index));
+      }
+
+      double dE(int Ti, int Tj, double r2) const
+      {
+        const unsigned int index = floor(r2 * m_scale);
+        return m_dE.at(key(Ti, Tj)).at(index);
+      }
+    private:
+      inline unsigned int key(int Ti, int Tj) const
+      {
+        if (Ti > Tj)
+          return 1000 * Ti + Tj;
+        else
+          return 1000 * Tj + Ti;
+      }
+
+      OBFFParameter* findParameter(int a)
+      {
+        OBFFParameter *par;
+
+        for (unsigned int idx=0; idx < m_parameters.size(); idx++)
+          if (a == m_parameters[idx].a) {
+            par = &m_parameters[idx];
+            return par;
+          }
+
+        return 0;
+      }
+ 
+      std::vector<OBFFParameter>                        m_parameters;
+      double                                            m_scale;
+      std::map<unsigned int, std::vector<double> >      m_values;
+      std::map<unsigned int, std::vector<double> >      m_dE;
+  };
+
+
+
+
+
   ////////////////////////////////////////////////////////////////////////////////
   ////////////////////////////////////////////////////////////////////////////////
   //
@@ -72,6 +313,9 @@ namespace OpenBabel
       energy += E_VDW<false>();
       energy += E_Electrostatic<false>();
     }
+
+    m_vdwNbrList->update();
+    m_eleNbrList->update();
 
     IF_OBFF_LOGLVL_MEDIUM {
       snprintf(_logbuf, BUFF_SIZE, "\nTOTAL ENERGY = %8.5f %s\n", energy, GetUnit().c_str());
@@ -643,44 +887,6 @@ namespace OpenBabel
   }
  
   template<bool gradients>
-  inline void OBFFVDWCalculationMMFF94::Compute()
-  {
-    if (OBForceField::IgnoreCalculation(idx_a, idx_b)) {
-      energy = 0.0;
-      return;
-    }
-    
-    if (gradients) {
-      rab = OBForceField::VectorDistanceDerivative(pos_a, pos_b, force_a, force_b);
-    } else {
-      rab = OBForceField::VectorDistance(pos_a, pos_b);
-    }
-    
-    const double rab7 = rab*rab*rab*rab*rab*rab*rab;
-
-    double erep = (1.07 * R_AB) / (rab + 0.07 * R_AB); //***
-    double erep7 = erep*erep*erep*erep*erep*erep*erep;
-      
-    double eattr = (((1.12 * R_AB7) / (rab7 + 0.12 * R_AB7)) - 2.0);
-      
-    energy = epsilon * erep7 * eattr;
-    
-    if (gradients) { 
-      const double q = rab / R_AB;
-      const double q6 = q*q*q*q*q*q;
-      const double q7 = q6 * q;
-      erep = 1.07 / (q + 0.07); 
-      erep7 = erep*erep*erep*erep*erep*erep*erep;
-      const double term = q7 + 0.12;
-      const double term2 = term * term;
-      eattr = (-7.84 * q6) / term2 + ((-7.84 / term) + 14) / (q + 0.07);
-      const double dE = (epsilon / R_AB) * erep7 * eattr;
-      OBForceField::VectorSelfMultiply(force_a, dE);
-      OBForceField::VectorSelfMultiply(force_b, dE);
-    }
-  }
-  
-  template<bool gradients>
   double OBForceFieldMMFF94::E_VDW()
   {
     double energy = 0.0;
@@ -692,78 +898,40 @@ namespace OpenBabel
       OBFFLog("--------------------------------------------------\n");
       //       XX   XX     -000.000  -000.000  -000.000  -000.000
     }
-    
-    #ifdef _OPENMP
-    #pragma omp parallel for reduction(+:energy)
-    #endif
-    for (int i = 0; i < _vdwcalculations.size(); ++i) {
-      // Cut-off check
-      if (_cutoff)
-        if (!_vdwpairs.BitIsSet(i)) 
-          continue;
 
-      _vdwcalculations[i].template Compute<gradients>();
-      energy += _vdwcalculations[i].energy;
-      
-      #ifndef _OPENMP
-      if (gradients) {
-        AddGradient(_vdwcalculations[i].force_a, _vdwcalculations[i].idx_a);
-        AddGradient(_vdwcalculations[i].force_b, _vdwcalculations[i].idx_b);
-      }
-      #endif
+    FOR_ATOMS_OF_MOL (atom, _mol) {
+      std::vector<OBAtom*> nbrs = m_vdwNbrList->nbrs(&*atom);
 
-      IF_OBFF_LOGLVL_HIGH {
-        snprintf(_logbuf, BUFF_SIZE, "%2d   %2d     %8.3f  %8.3f  %8.3f  %8.3f\n", 
-                atoi(_vdwcalculations[i].a->GetType()), atoi(_vdwcalculations[i].b->GetType()), 
-                _vdwcalculations[i].rab, _vdwcalculations[i].R_AB, _vdwcalculations[i].epsilon, _vdwcalculations[i].energy);
-        OBFFLog(_logbuf);
-      }
+      for (unsigned int i = 0; i < nbrs.size(); ++i) {
+        double rab2 = m_vdwNbrList->r2(i);
+        
+        if (gradients) {
+          const double dE = m_vdwTable->dE(m_atomTypes.at(atom->GetIdx()-1), m_atomTypes.at(nbrs[i]->GetIdx()-1), rab2);
+          Eigen::Vector3d Fb( Eigen::Vector3d(atom->GetVector().AsArray()) - 
+                              Eigen::Vector3d(nbrs[i]->GetVector().AsArray()) );
+          Fb *= dE;
+          Eigen::Vector3d Fa(-Fb);
+          AddGradient(Fa.data(), atom->GetIdx());
+          AddGradient(Fb.data(), nbrs[i]->GetIdx());
+        } 
       
-    }
+        double e = m_vdwTable->value(m_atomTypes.at(atom->GetIdx()-1), m_atomTypes.at(nbrs[i]->GetIdx()-1), rab2);
+        energy += e;
 
-    #ifdef _OPENMP
-    for (int i = 0; i < _vdwcalculations.size(); ++i) {
-      // Cut-off check
-      if (_cutoff)
-        if (!_vdwpairs.BitIsSet(i)) 
-          continue;
-      
-      if (gradients) {
-        AddGradient(_vdwcalculations[i].force_a, _vdwcalculations[i].idx_a);
-        AddGradient(_vdwcalculations[i].force_b, _vdwcalculations[i].idx_b);
+        IF_OBFF_LOGLVL_HIGH {
+          snprintf(_logbuf, BUFF_SIZE, "%2d   %2d     %8.3f  %8.3f  %8.3f  %8.3f\n", 
+                atoi(atom->GetType()), atoi(nbrs[i]->GetType()), sqrt(rab2), 0.0, 0.0, e);
+          OBFFLog(_logbuf);
+        }
       }
     }
-    #endif
-     
+
     IF_OBFF_LOGLVL_MEDIUM {
       snprintf(_logbuf, BUFF_SIZE, "     TOTAL VAN DER WAALS ENERGY = %8.5f %s\n", energy, GetUnit().c_str());
       OBFFLog(_logbuf);
     }
-
+    
     return energy;
-  }
-
-  template<bool gradients>
-  inline void OBFFElectrostaticCalculationMMFF94::Compute()
-  {
-    if (OBForceField::IgnoreCalculation(idx_a, idx_b)) {
-      energy = 0.0;
-      return;
-    }
-
-    if (gradients) {
-      rab = OBForceField::VectorDistanceDerivative(pos_a, pos_b, force_a, force_b);
-      rab += 0.05; // ??
-      const double rab2 = rab * rab;
-      const double dE = -qq / rab2;
-      OBForceField::VectorSelfMultiply(force_a, dE);
-      OBForceField::VectorSelfMultiply(force_b, dE);
-    } else {
-      rab = OBForceField::VectorDistance(pos_a, pos_b);
-      rab += 0.05; // ??
-    }
-
-    energy = qq / rab;
   }
 
   template<bool gradients>
@@ -779,48 +947,44 @@ namespace OpenBabel
       //       XX   XX     XXXXXXXX   XXXXXXXX   XXXXXXXX   XXXXXXXX
     }
 
-    #ifdef _OPENMP
-    #pragma omp parallel for reduction(+:energy)
-    #endif
-    for (int i = 0; i < _electrostaticcalculations.size(); ++i) {
-      // Cut-off check
-      if (_cutoff)
-        if (!_elepairs.BitIsSet(i)) 
-          continue;
-     
-      _electrostaticcalculations[i].template Compute<gradients>();
-      energy += _electrostaticcalculations[i].energy;
-      
-      #ifndef _OPENMP
-      if (gradients) {
-        AddGradient(_electrostaticcalculations[i].force_a, _electrostaticcalculations[i].idx_a);
-        AddGradient(_electrostaticcalculations[i].force_b, _electrostaticcalculations[i].idx_b);
-      }
-      #endif
+    FOR_ATOMS_OF_MOL (atom, _mol) {
+      if (atom->GetPartialCharge() == 0.0)
+        continue;
+      std::vector<OBAtom*> nbrs = m_eleNbrList->nbrs(&*atom);
 
-      IF_OBFF_LOGLVL_HIGH {
-        snprintf(_logbuf, BUFF_SIZE, "%2d   %2d   %8.3f  %8.3f  %8.3f  %8.3f\n", 
-                atoi(_electrostaticcalculations[i].a->GetType()), atoi(_electrostaticcalculations[i].b->GetType()), 
-                _electrostaticcalculations[i].rab, _electrostaticcalculations[i].a->GetPartialCharge(), 
-                _electrostaticcalculations[i].b->GetPartialCharge(), _electrostaticcalculations[i].energy);
-        OBFFLog(_logbuf);
-      }
-    }
-    
-    #ifdef _OPENMP
-    for (int i = 0; i < _electrostaticcalculations.size(); ++i) {
-      // Cut-off check
-      if (_cutoff)
-        if (!_elepairs.BitIsSet(i)) 
+      for (int i = 0; i < nbrs.size(); ++i) {
+        if (nbrs[i]->GetPartialCharge() == 0.0)
           continue;
+        
+        double QiQj = atom->GetPartialCharge() * nbrs[i]->GetPartialCharge();
+        if (m_oneFourList->IsOneFour(atom->GetIdx(), nbrs[i]->GetIdx()))
+          QiQj *= 0.75;
+
+        double rab2 = m_eleNbrList->r2(i);
+        if (gradients) {
+          const double dE = QiQj * m_eleTable->dE(rab2);
+          Eigen::Vector3d Fb( Eigen::Vector3d(atom->GetVector().AsArray()) - 
+                              Eigen::Vector3d(nbrs[i]->GetVector().AsArray()) );
+          Fb *= dE;
+          Eigen::Vector3d Fa(-Fb);
+          AddGradient(Fa.data(), atom->GetIdx());
+          AddGradient(Fb.data(), nbrs[i]->GetIdx());
+        }
       
-      if (gradients) {
-        AddGradient(_electrostaticcalculations[i].force_a, _electrostaticcalculations[i].idx_a);
-        AddGradient(_electrostaticcalculations[i].force_b, _electrostaticcalculations[i].idx_b);
-      }
-    }
-    #endif
+        const double e = QiQj * m_eleTable->value(rab2);
+        energy += e;
+
+        IF_OBFF_LOGLVL_HIGH {
+          snprintf(_logbuf, BUFF_SIZE, "%2d   %2d   %8.3f  %8.3f  %8.3f  %8.3f\n", 
+                atoi(atom->GetType()), atoi(nbrs[i]->GetType()), sqrt(rab2), 
+                atom->GetPartialCharge(), nbrs[i]->GetPartialCharge(), e);
+          OBFFLog(_logbuf);
+        }
  
+      }
+        
+    }
+
     IF_OBFF_LOGLVL_MEDIUM {
       snprintf(_logbuf, BUFF_SIZE, "     TOTAL ELECTROSTATIC ENERGY = %8.5f %s\n", energy, GetUnit().c_str());
       OBFFLog(_logbuf);
@@ -2606,9 +2770,11 @@ namespace OpenBabel
       done = PerceiveAromatic();
     }
     
+    m_atomTypes.resize(_mol.NumAtoms());
     FOR_ATOMS_OF_MOL (atom, _mol) {
       snprintf(type, 3, "%d", GetType(&*atom));
       atom->SetType(type);
+      m_atomTypes[atom->GetIdx()-1] = atoi(type);
     }
     
     PrintTypes();
@@ -2662,7 +2828,8 @@ namespace OpenBabel
       
       bondtype = GetBondType(a, b);
       
-      parameter = GetTypedParameter2Atom(bondtype, atoi(a->GetType()), atoi(b->GetType()), _ffbondparams); // from mmffbond.par
+      parameter = GetTypedParameter2Atom(bondtype, m_atomTypes.at(a->GetIdx()-1), 
+                                         m_atomTypes.at(b->GetIdx()-1), _ffbondparams); // from mmffbond.par
       if (parameter == NULL) {
         parameter = GetParameter2Atom(a->GetAtomicNum(), b->GetAtomicNum(), _ffbndkparams); // from mmffbndk.par - emperical rules
         if (parameter == NULL) { 
@@ -2735,9 +2902,9 @@ namespace OpenBabel
       a = _mol.GetAtom((*angle)[1] + 1);
       c = _mol.GetAtom((*angle)[2] + 1);
 
-      type_a = atoi(a->GetType());
-      type_b = atoi(b->GetType());
-      type_c = atoi(c->GetType());
+      type_a = m_atomTypes.at(a->GetIdx()-1);
+      type_b = m_atomTypes.at(b->GetIdx()-1);
+      type_c = m_atomTypes.at(c->GetIdx()-1);
       
       // skip this angle if the atoms are ignored 
       if ( _constraints.IsIgnored(a->GetIdx()) || _constraints.IsIgnored(b->GetIdx()) || _constraints.IsIgnored(c->GetIdx()) ) 
@@ -3027,10 +3194,10 @@ namespace OpenBabel
       c = _mol.GetAtom((*t)[2] + 1);
       d = _mol.GetAtom((*t)[3] + 1);
       
-      type_a = atoi(a->GetType());
-      type_b = atoi(b->GetType());
-      type_c = atoi(c->GetType());
-      type_d = atoi(d->GetType());
+      type_a = m_atomTypes.at(a->GetIdx()-1);
+      type_b = m_atomTypes.at(b->GetIdx()-1);
+      type_c = m_atomTypes.at(c->GetIdx()-1);
+      type_d = m_atomTypes.at(d->GetIdx()-1);
       
       // skip this torsion if the atoms are ignored 
       if ( _constraints.IsIgnored(a->GetIdx()) || _constraints.IsIgnored(b->GetIdx()) ||
@@ -3286,7 +3453,7 @@ namespace OpenBabel
 
       found = false;
 
-      type_b = atoi(b->GetType());
+      type_b = m_atomTypes.at(b->GetIdx()-1);
       
       for (unsigned int idx=0; idx < _ffoopparams.size(); idx++) {
         if (type_b == _ffoopparams[idx].b) {
@@ -3306,9 +3473,9 @@ namespace OpenBabel
           if ((a == NULL) || (c == NULL) || (d == NULL))
             break;
           
-          type_a = atoi(a->GetType());
-          type_c = atoi(c->GetType());
-          type_d = atoi(d->GetType());
+          type_a = m_atomTypes.at(a->GetIdx()-1);
+          type_c = m_atomTypes.at(c->GetIdx()-1);
+          type_d = m_atomTypes.at(d->GetIdx()-1);
  
           // skip this oop if the atoms are ignored 
           if ( _constraints.IsIgnored(a->GetIdx()) || _constraints.IsIgnored(b->GetIdx()) ||
@@ -3395,181 +3562,57 @@ namespace OpenBabel
       }
     }
 
-    // 
-    // VDW Calculations
-    //  
-    IF_OBFF_LOGLVL_LOW
-      OBFFLog("SETTING UP VAN DER WAALS CALCULATIONS...\n");
- 
-    OBFFVDWCalculationMMFF94 vdwcalc;
-
-    _vdwcalculations.clear();
- 
-    FOR_PAIRS_OF_MOL(p, _mol) {
-      a = _mol.GetAtom((*p)[0]);
-      b = _mol.GetAtom((*p)[1]);
-      
-      // skip this vdw if the atoms are ignored 
-      if ( _constraints.IsIgnored(a->GetIdx()) || _constraints.IsIgnored(b->GetIdx()) )
-        continue;
-  
-      // if there are any groups specified, check if the two atoms are in a single _interGroup or if
-      // two two atoms are in one of the _interGroups pairs.
-      if (HasGroups()) {
-        bool validVDW = false;
-        for (unsigned int i=0; i < _interGroup.size(); ++i) {
-          if (_interGroup[i].BitIsOn(a->GetIdx()) && _interGroup[i].BitIsOn(b->GetIdx())) 
-            validVDW = true;
-        }
-        for (unsigned int i=0; i < _interGroups.size(); ++i) {
-          if (_interGroups[i].first.BitIsOn(a->GetIdx()) && _interGroups[i].second.BitIsOn(b->GetIdx())) 
-            validVDW = true;
-          if (_interGroups[i].first.BitIsOn(b->GetIdx()) && _interGroups[i].second.BitIsOn(a->GetIdx())) 
-            validVDW = true;
-        }
- 
-        if (!validVDW)
-          continue;
-      }
- 
-      OBFFParameter *parameter_a, *parameter_b;
-      parameter_a = GetParameter1Atom(atoi(a->GetType()), _ffvdwparams);
-      parameter_b = GetParameter1Atom(atoi(b->GetType()), _ffvdwparams);
-      if ((parameter_a == NULL) || (parameter_b == NULL)) {
-        IF_OBFF_LOGLVL_LOW {
-          snprintf(_logbuf, BUFF_SIZE, "   COULD NOT FIND VAN DER WAALS PARAMETERS FOR %d-%d (IDX)...\n", a->GetIdx(), b->GetIdx());
-          OBFFLog(_logbuf);
-        }
-
-        return false;
-      }
-      
-      vdwcalc.a = a;
-      vdwcalc.alpha_a = parameter_a->_dpar[0];
-      vdwcalc.Na = parameter_a->_dpar[1];
-      vdwcalc.Aa = parameter_a->_dpar[2];
-      vdwcalc.Ga = parameter_a->_dpar[3];
-      vdwcalc.aDA = parameter_a->_ipar[0];
-      
-      vdwcalc.b = b;
-      vdwcalc.alpha_b = parameter_b->_dpar[0];
-      vdwcalc.Nb = parameter_b->_dpar[1];
-      vdwcalc.Ab = parameter_b->_dpar[2];
-      vdwcalc.Gb = parameter_b->_dpar[3];
-      vdwcalc.bDA = parameter_b->_ipar[0];
-      
-      //these calculations only need to be done once for each pair, 
-      //we do them now and save them for later use
-      double R_AA, R_BB, R_AB6, g_AB, g_AB2;
-      double R_AB2, R_AB4, /*R_AB7,*/ sqrt_a, sqrt_b;
- 
-      R_AA = vdwcalc.Aa * pow(vdwcalc.alpha_a, 0.25);
-      R_BB = vdwcalc.Ab * pow(vdwcalc.alpha_b, 0.25);
-      sqrt_a = sqrt(vdwcalc.alpha_a / vdwcalc.Na);
-      sqrt_b = sqrt(vdwcalc.alpha_b / vdwcalc.Nb);
-      
-      if (vdwcalc.aDA == 1) { // hydrogen bond donor
-        vdwcalc.R_AB = 0.5 * (R_AA + R_BB);
-        R_AB2 = vdwcalc.R_AB * vdwcalc.R_AB;
-        R_AB4 = R_AB2 * R_AB2;
-        R_AB6 = R_AB4 * R_AB2;
-        
-        if (vdwcalc.bDA == 2) { // hydrogen bond acceptor
-          vdwcalc.epsilon = 0.5 * (181.16 * vdwcalc.Ga * vdwcalc.Gb * vdwcalc.alpha_a * vdwcalc.alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
-          // R_AB is scaled to 0.8 for D-A interactions. The value used in the calculation of epsilon is not scaled. 
-          vdwcalc.R_AB = 0.8 * vdwcalc.R_AB;
-        } else
-          vdwcalc.epsilon = (181.16 * vdwcalc.Ga * vdwcalc.Gb * vdwcalc.alpha_a * vdwcalc.alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
-	
-        R_AB2 = vdwcalc.R_AB * vdwcalc.R_AB;
-        R_AB4 = R_AB2 * R_AB2;
-        R_AB6 = R_AB4 * R_AB2;
-        vdwcalc.R_AB7 = R_AB6 * vdwcalc.R_AB;
-      } else if (vdwcalc.bDA == 1) { // hydrogen bond donor
-        vdwcalc.R_AB = 0.5 * (R_AA + R_BB);
-       	R_AB2 = vdwcalc.R_AB * vdwcalc.R_AB;
-        R_AB4 = R_AB2 * R_AB2;
-        R_AB6 = R_AB4 * R_AB2;
-        
-        if (vdwcalc.aDA == 2) { // hydrogen bond acceptor
-          vdwcalc.epsilon = 0.5 * (181.16 * vdwcalc.Ga * vdwcalc.Gb * vdwcalc.alpha_a * vdwcalc.alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
-          // R_AB is scaled to 0.8 for D-A interactions. The value used in the calculation of epsilon is not scaled. 
-          vdwcalc.R_AB = 0.8 * vdwcalc.R_AB;
-        } else
-          vdwcalc.epsilon = (181.16 * vdwcalc.Ga * vdwcalc.Gb * vdwcalc.alpha_a * vdwcalc.alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
-	
-        R_AB2 = vdwcalc.R_AB * vdwcalc.R_AB;
-        R_AB4 = R_AB2 * R_AB2;
-        R_AB6 = R_AB4 * R_AB2;
-        vdwcalc.R_AB7 = R_AB6 * vdwcalc.R_AB;
-      } else {
-        g_AB = (R_AA - R_BB) / ( R_AA + R_BB);
-        g_AB2 = g_AB * g_AB;
-        vdwcalc.R_AB =  0.5 * (R_AA + R_BB) * (1.0 + 0.2 * (1.0 - exp(-12.0 * g_AB2)));
-        R_AB2 = vdwcalc.R_AB * vdwcalc.R_AB;
-        R_AB4 = R_AB2 * R_AB2;
-        R_AB6 = R_AB4 * R_AB2;
-        vdwcalc.R_AB7 = R_AB6 * vdwcalc.R_AB;
-        vdwcalc.epsilon = (181.16 * vdwcalc.Ga * vdwcalc.Gb * vdwcalc.alpha_a * vdwcalc.alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
-      }
-      
-      vdwcalc.SetupPointers();
-      _vdwcalculations.push_back(vdwcalc);
-    }
-    
-    // 
-    // Electrostatic Calculations
-    //
-    IF_OBFF_LOGLVL_LOW
-      OBFFLog("SETTING UP ELECTROSTATIC CALCULATIONS...\n");
- 
-    OBFFElectrostaticCalculationMMFF94 elecalc;
-
-    _electrostaticcalculations.clear();
-    
-    FOR_PAIRS_OF_MOL(p, _mol) {
-      a = _mol.GetAtom((*p)[0]);
-      b = _mol.GetAtom((*p)[1]);
-      
-      // skip this ele if the atoms are ignored 
-      if ( _constraints.IsIgnored(a->GetIdx()) || _constraints.IsIgnored(b->GetIdx()) )
-        continue;
-  
-      // if there are any groups specified, check if the two atoms are in a single _interGroup or if
-      // two two atoms are in one of the _interGroups pairs.
-      if (HasGroups()) {
-        bool validEle = false;
-        for (unsigned int i=0; i < _interGroup.size(); ++i) {
-          if (_interGroup[i].BitIsOn(a->GetIdx()) && _interGroup[i].BitIsOn(b->GetIdx())) 
-            validEle = true;
-        }
-        for (unsigned int i=0; i < _interGroups.size(); ++i) {
-          if (_interGroups[i].first.BitIsOn(a->GetIdx()) && _interGroups[i].second.BitIsOn(b->GetIdx())) 
-            validEle = true;
-          if (_interGroups[i].first.BitIsOn(b->GetIdx()) && _interGroups[i].second.BitIsOn(a->GetIdx())) 
-            validEle = true;
-        }
- 
-        if (!validEle)
-          continue;
-      }
- 
-      elecalc.qq = 332.0716 * a->GetPartialCharge() * b->GetPartialCharge();
-      
-      if (elecalc.qq) {
-        elecalc.a = &*a;
-        elecalc.b = &*b;
-        
-        // 1-4 scaling
-        if (a->IsOneFour(b))
-          elecalc.qq *= 0.75;
-	  
-        elecalc.SetupPointers();
-        _electrostaticcalculations.push_back(elecalc);
-      }
-    }
+    SetupNonBonded();
 
     return true;
+  }
+
+  bool OBForceFieldMMFF94::SetupNonBonded()
+  {
+    // create the atom list for OBNbrList constructor
+    std::vector<OBAtom*> atoms;
+    FOR_ATOMS_OF_MOL (atom, _mol)
+      atoms.push_back(&*atom);
+   
+    IF_OBFF_LOGLVL_LOW
+      OBFFLog("SETTING UP VAN DER WAALS CALCULATIONS...\n");
+    // create the vdw nbr list
+    if (m_vdwNbrList)
+      delete m_vdwNbrList;
+    m_vdwNbrList = new OBNbrList(atoms, _rvdw);
+
+    // initialize the vdw lookup table
+    if (m_vdwTable)
+      delete m_vdwTable;
+    std::vector<int> uniqueTypes;
+    for (std::vector<int>::iterator ti = m_atomTypes.begin(); ti != m_atomTypes.end(); ++ti) {
+      bool add = true;
+      for (std::vector<int>::iterator tj = uniqueTypes.begin(); tj != uniqueTypes.end(); ++tj)
+        if (*ti == *tj)
+          add = false;
+
+      if (add)
+        uniqueTypes.push_back(*ti);
+    }
+    m_vdwTable = new VdwLookupTable(uniqueTypes, _ffvdwparams, 10, _rvdw);
+
+    IF_OBFF_LOGLVL_LOW
+      OBFFLog("SETTING UP ELECTROSTATIC CALCULATIONS...\n");
+    // create the ielectrostatic nbr list
+    if (m_eleNbrList)
+      delete m_eleNbrList;
+    m_eleNbrList = new OBNbrList(atoms, _rele);
+ 
+    // initialize the electrostatic lookup table
+    if (m_eleTable)
+     delete m_eleTable;
+    m_eleTable = new ElectrostaticLookupTable(10, _rele);
+   
+    // initialize the 1-4 cache 
+    if (m_oneFourList)
+      delete m_oneFourList;
+    m_oneFourList = new OneFourList(&_mol);
+
   }
 
   bool OBForceFieldMMFF94::SetupPointers()
@@ -3584,10 +3627,6 @@ namespace OpenBabel
       _torsioncalculations[i].SetupPointers();
     for (unsigned int i = 0; i < _oopcalculations.size(); ++i)
       _oopcalculations[i].SetupPointers();
-    for (unsigned int i = 0; i < _vdwcalculations.size(); ++i)
-      _vdwcalculations[i].SetupPointers();
-    for (unsigned int i = 0; i < _electrostaticcalculations.size(); ++i)
-      _electrostaticcalculations[i].SetupPointers();
 
     return true;
   }
@@ -3600,7 +3639,7 @@ namespace OpenBabel
     _mol.SetAutomaticPartialCharge(false);
     
     FOR_ATOMS_OF_MOL (atom, _mol) {
-      int type = atoi(atom->GetType());
+      int type = m_atomTypes.at(atom->GetIdx()-1);
       atom->SetPartialCharge(0.0);
       
       bool done = false;
@@ -3753,12 +3792,12 @@ namespace OpenBabel
 	    
             FOR_NBORS_OF_ATOM(nbr, &*atom)
               FOR_NBORS_OF_ATOM(nbr2, &*nbr)
-              if (atoi(nbr2->GetType()) == 56)
+              if (m_atomTypes.at(nbr2->GetIdx()-1) == 56)
                 atom->SetPartialCharge(1.0 / 3.0);
   	  
             FOR_NBORS_OF_ATOM(nbr, &*atom)
               FOR_NBORS_OF_ATOM(nbr2, &*nbr)
-              if (atoi(nbr2->GetType()) == 55)
+              if (m_atomTypes.at(nbr2->GetIdx()-1) == 55)
                 atom->SetPartialCharge(1.0 / (1.0 + n_count));
           }
       } 
@@ -3776,7 +3815,7 @@ namespace OpenBabel
     double M, Wab, factor, q0a, q0b, Pa, Pb;
 
     FOR_ATOMS_OF_MOL (atom, _mol) {
-      int type = atoi(atom->GetType());
+      int type = m_atomTypes.at(atom->GetIdx()-1);
 
       switch (type) {
       case 32:
@@ -3812,7 +3851,7 @@ namespace OpenBabel
       Wab = 0.0;
       Pa = Pb = 0.0;
       FOR_NBORS_OF_ATOM (nbr, &*atom) {
-        int nbr_type = atoi(nbr->GetType());
+        int nbr_type = m_atomTypes.at(nbr->GetIdx()-1);
 
         q0b += nbr->GetPartialCharge();
     
@@ -4358,10 +4397,10 @@ namespace OpenBabel
       return 0;
     
     if (!_mol.GetBond(a,b)->IsAromatic())
-      if (HasAromSet(atoi(a->GetType())) && HasAromSet(atoi(b->GetType())))
+      if (HasAromSet(m_atomTypes.at(a->GetIdx()-1)) && HasAromSet(m_atomTypes.at(b->GetIdx()-1)))
         return 1;
       
-    if (HasSbmbSet(atoi(a->GetType())) && HasSbmbSet(atoi(b->GetType())))
+    if (HasSbmbSet(m_atomTypes.at(a->GetIdx()-1)) && HasSbmbSet(m_atomTypes.at(b->GetIdx()-1)))
       return 1;
     
     return 0;
@@ -4405,7 +4444,7 @@ namespace OpenBabel
     btbc = GetBondType(b, c);
     atabc = GetAngleType(a, b, c);
 
-    if (atoi(a->GetType()) <= atoi(c->GetType()))
+    if (m_atomTypes.at(a->GetIdx()-1) <= m_atomTypes.at(c->GetIdx()-1))
       inverse = false;
     else
       inverse = true;
@@ -4512,7 +4551,8 @@ namespace OpenBabel
       vector<OBRing*> vr;
       vr = _mol.GetSSSR();
     
-      if( !((atoi(a->GetType()) == 1) || (atoi(b->GetType()) == 1) || (atoi(c->GetType()) == 1) || (atoi(d->GetType()) == 1)) )
+      if( !((m_atomTypes.at(a->GetIdx()-1) == 1) || (m_atomTypes.at(b->GetIdx()-1) == 1) || 
+            (m_atomTypes.at(c->GetIdx()-1) == 1) || (m_atomTypes.at(d->GetIdx()-1) == 1)) )
         return 0;
 
       vector<OBRing*>::iterator ri;
@@ -4845,7 +4885,8 @@ namespace OpenBabel
     OBFFParameter *parameter;
     double rab;
 
-    parameter = GetTypedParameter2Atom(GetBondType(a, b), atoi(a->GetType()), atoi(b->GetType()), _ffbondparams);
+    parameter = GetTypedParameter2Atom(GetBondType(a, b), m_atomTypes.at(a->GetIdx()-1), 
+        m_atomTypes.at(b->GetIdx()-1), _ffbondparams);
     if (parameter == NULL)
       rab = GetRuleBondLength(a, b); 
     else 
@@ -4875,29 +4916,29 @@ namespace OpenBabel
     else
       c = 0.085;
 
-    if (GetMltb(atoi(a->GetType()) == 3))
+    if (GetMltb(m_atomTypes.at(a->GetIdx()-1) == 3))
       Ha = 1;
-    else if ((GetMltb(atoi(a->GetType())) == 1) || (GetMltb(atoi(a->GetType())) == 2))
+    else if ((GetMltb(m_atomTypes.at(a->GetIdx()-1)) == 1) || (GetMltb(m_atomTypes.at(a->GetIdx()-1)) == 2))
       Ha = 2;
     else
       Ha = 3;
 
-    if (GetMltb(atoi(b->GetType()) == 3))
+    if (GetMltb(m_atomTypes.at(b->GetIdx()-1) == 3))
       Hb = 1;
-    else if ((GetMltb(atoi(b->GetType())) == 1) || (GetMltb(atoi(b->GetType())) == 2))
+    else if ((GetMltb(m_atomTypes.at(b->GetIdx()-1)) == 1) || (GetMltb(m_atomTypes.at(b->GetIdx()-1)) == 2))
       Hb = 2;
     else
       Hb = 3;
 
     BOab = a->GetBond(b)->GetBondOrder();
-    if ((GetMltb(atoi(a->GetType())) == 1) && (GetMltb(atoi(b->GetType())) == 1))
+    if ((GetMltb(m_atomTypes.at(a->GetIdx()-1)) == 1) && (GetMltb(m_atomTypes.at(b->GetIdx()-1)) == 1))
       BOab = 4;
-    if ((GetMltb(atoi(a->GetType())) == 1) && (GetMltb(atoi(b->GetType())) == 2))
+    if ((GetMltb(m_atomTypes.at(a->GetIdx()-1)) == 1) && (GetMltb(m_atomTypes.at(b->GetIdx()-1)) == 2))
       BOab = 5;
-    if ((GetMltb(atoi(a->GetType())) == 2) && (GetMltb(atoi(b->GetType())) == 1))
+    if ((GetMltb(m_atomTypes.at(a->GetIdx()-1)) == 2) && (GetMltb(m_atomTypes.at(b->GetIdx()-1)) == 1))
       BOab = 5;
     if (a->GetBond(b)->IsAromatic())
-      if (!HasPilpSet(atoi(a->GetType())) && !HasPilpSet(atoi(b->GetType())))
+      if (!HasPilpSet(m_atomTypes.at(a->GetIdx()-1)) && !HasPilpSet(m_atomTypes.at(b->GetIdx()-1)))
         BOab = 4;
       else
         BOab = 5;

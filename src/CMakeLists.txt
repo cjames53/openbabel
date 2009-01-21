@@ -15,6 +15,8 @@ set(fingerprints_srcs
 )
 
 set(forcefields_srcs
+    forcefields/obnbrlist.cpp
+
     forcefields/forcefieldghemical.cpp
     forcefields/forcefieldmmff94.cpp
     forcefields/forcefielduff.cpp
