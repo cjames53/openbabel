@@ -446,8 +446,14 @@ namespace OpenBabel
 
       double dE(int Ti, int Tj, double r2, double QiQj) const
       {
-        const unsigned int index = floor(r2 * m_scale);
-        return m_dEvdw.at(key(Ti, Tj)).at(index) + QiQj * m_dEele.at(index);
+        const unsigned int k = key(Ti, Tj);
+        double alpha = r2 * m_scale;
+        const unsigned int index = floor(alpha);
+        alpha -= index;
+
+        //return m_dEvdw.at(key(Ti, Tj)).at(index) + QiQj * m_dEele.at(index);
+        return m_dEvdw.at(k).at(index) + alpha * (m_dEvdw.at(k).at(index+1) - m_dEvdw.at(k).at(index)) +
+               QiQj * ( m_dEele.at(index) + alpha * (m_dEele.at(index+1) - m_dEele.at(index))); 
       }
     private:
       inline unsigned int key(int Ti, int Tj) const

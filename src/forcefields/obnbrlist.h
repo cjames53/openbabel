@@ -59,6 +59,21 @@ namespace OpenBabel
         return i + j * dim + k * dim * dim;
       }
 
+      inline unsigned int ghostIndex(int i, int j, int k) const
+      {
+        i += m_boxSize;
+        j += m_boxSize;
+        k += m_boxSize;
+        int xDim = 2 * m_boxSize + m_dim.x();
+        int yDim = 2 * m_boxSize + m_dim.y();
+        return i + j * xDim + k * xDim * yDim;
+      }
+
+      inline unsigned int ghostIndex(const Eigen::Vector3i &index) const
+      {
+        return ghostIndex(index.x(), index.y(), index.z());
+      }
+
       inline unsigned int cellIndex(int i, int j, int k) const
       {
         return i + j * m_dim.x() + k * m_xyDim;
@@ -111,10 +126,12 @@ namespace OpenBabel
       void initOneTwo();
       void initCells();
       void initOffsetMap();
+      void initGhostMap(bool periodic = false);
 
       OBMol                              *m_mol;
       double                             *m_coords;
       std::vector<Eigen::Vector3i>        m_offsetMap;
+      std::vector<Eigen::Vector3i>        m_ghostMap;
       double                              m_rcut, m_rcut2;
       double                              m_edgeLength;
       int                                 m_boxSize;
