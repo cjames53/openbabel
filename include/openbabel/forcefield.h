@@ -711,14 +711,21 @@ namespace OpenBabel
     bool GetPartialCharges(OBMol &mol);
 
 
-
     /*! Get coordinates for current conformer and attach OBConformerData with energies, forces, ... to mol.
      *  \param mol The OBMol object to copy the coordinates to (from OBForceField::_mol).
      *  \return True if succesfull.
      */
     bool GetCoordinates(OBMol &mol);
+    /*! Get a pointer to the coordinates for the current conformer.
+     *  \return coordinates pointer
+     */
+    double* GetCoordinates() { return _mol.GetCoordinates(); }
+    /*! Get a pointer to the gradients.
+     *  \return gradients pointer
+     */
+    double* GetGradients() { return _gradientPtr; }
     //! \deprecated Use GetCooordinates instead.
-    bool UpdateCoordinates(OBMol &mol) {return GetCoordinates(mol); } 
+    bool UpdateCoordinates(OBMol &mol) { return GetCoordinates(mol); } 
     /*! Get coordinates for all conformers and attach OBConformerData with energies, forces, ... to mol.
      *  \param mol The OBMol object to copy the coordinates to (from OBForceField::_mol).
      *  \return True if succesfull.
@@ -731,6 +738,10 @@ namespace OpenBabel
      *  \return true if succesfull.
      */
     bool SetCoordinates(OBMol &mol);
+    /*! Set coordinates for current conformer.
+     *  \param coords pointer to the new coordinates.
+     */
+    void SetCoordinates(double *coords);
     /*! Set coordinates for all conformers.
      *  \param mol The OBMol object to copy the coordinates from (to OBForceField::_mol).
      *  \return True if succesfull.

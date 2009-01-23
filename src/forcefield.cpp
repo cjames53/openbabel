@@ -1068,18 +1068,9 @@ namespace OpenBabel
   
   bool OBForceField::GetConformers(OBMol &mol)
   { 
-//    OBAtom *atom;
-
     if (_mol.NumAtoms() != mol.NumAtoms())
       return false;
     
-    /*
-      FOR_ATOMS_OF_MOL (a, _mol) {
-      atom = mol.GetAtom(a->GetIdx());
-      atom->SetVector(a->GetVector());
-      }
-    */
-
     //Copy conformer information
     if (_mol.NumConformers() > 1) {
       int k,l;
@@ -1098,8 +1089,6 @@ namespace OpenBabel
         mol.SetData(new OBConformerData);
       OBConformerData *cd = (OBConformerData*) mol.GetData(OBGenericDataType::ConformerData);
       cd->SetEnergies(_energies);
-
-      //mol.SetEnergies(_energies);
     }
     
     return true;
@@ -1119,6 +1108,11 @@ namespace OpenBabel
     }
 
     return true;
+  }
+  
+  void OBForceField::SetCoordinates(double *coords)
+  {
+    _mol.SetCoordinates(coords);
   }
  
   bool OBForceField::SetConformers(OBMol &mol)
