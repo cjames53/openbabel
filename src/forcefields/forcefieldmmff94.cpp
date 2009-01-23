@@ -90,20 +90,20 @@ namespace OpenBabel
         rcut += 1.0;
         double inv_scale = 1.0 / scale;
         
-        m_values.resize(scale * rcut * rcut);
-        m_dE.resize(scale * rcut * rcut);
-        for (unsigned int i = 0; i < m_values.size(); ++i) {
+        m_eleValues.resize(scale * rcut * rcut);
+        m_dEele.resize(scale * rcut * rcut);
+        for (unsigned int i = 0; i < m_eleValues.size(); ++i) {
           double r2 = inv_scale * i;
           double r = sqrt(r2);
           // energy
-          m_values[i] = 332.0716 / (r + 0.05);
+          m_eleValues[i] = 332.0716 / (r + 0.05);
           // dE
-          m_dE[i] = -332.0716 / (r2 * r);
+          m_dEele[i] = -332.0716 / (r2 * r);
         }
 
         //cout << "----- ElectrostaticLookupTable -----" << endl;
         //cout << "    scale = " << scale << "  rcut = " << rcut << endl;
-        //cout << "    size = " << 2 * m_values.size() * sizeof(double) << endl;
+        //cout << "    size = " << 2 * m_eleValues.size() * sizeof(double) << endl;
       }
 
       double value(double r2) const
@@ -113,20 +113,20 @@ namespace OpenBabel
         double alpha = r2 * m_scale;
         const unsigned int index = floor(alpha);
         alpha -= index;
-        return m_values.at(index) + alpha * (m_values.at(index+1) - m_values.at(index));
+        return m_eleValues.at(index) + alpha * (m_eleValues.at(index+1) - m_eleValues.at(index));
       }
 
       double dE(double r2) const
       {
         // Use direct lookup for dE, faster
         const unsigned int index = floor(r2 * m_scale);
-        return m_dE.at(index);
+        return m_dEele.at(index);
       }
 
     private:
       double                    m_scale;
-      std::vector<double>       m_values;  
-      std::vector<double>       m_dE;  
+      std::vector<double>       m_eleValues;  
+      std::vector<double>       m_dEele;  
   };
 
   class VdwLookupTable
@@ -199,19 +199,19 @@ namespace OpenBabel
             
             unsigned int k = key(uniqueTypes[i], uniqueTypes[j]);
             
-            m_values[k].resize(scale * rcut * rcut);
-            for (unsigned int l = 0; l < m_values[k].size(); ++l) {
+            m_vdwValues[k].resize(scale * rcut * rcut);
+            for (unsigned int l = 0; l < m_vdwValues[k].size(); ++l) {
               const double r2 = inv_scale * l;
               const double r = sqrt(r2);
               const double rab7 = r2 * r2 * r2 * r;
               const double erep = (1.07 * R_AB) / (r + 0.07 * R_AB);
               const double erep7 = erep*erep*erep*erep*erep*erep*erep;
               const double eattr = (((1.12 * R_AB7) / (rab7 + 0.12 * R_AB7)) - 2.0);
-              m_values[k][l] = epsilon * erep7 * eattr;
+              m_vdwValues[k][l] = epsilon * erep7 * eattr;
             }
             
-            m_dE[k].resize(scale * rcut * rcut);
-            for (unsigned int l = 0; l < m_dE[k].size(); ++l) {
+            m_dEvdw[k].resize(scale * rcut * rcut);
+            for (unsigned int l = 0; l < m_dEvdw[k].size(); ++l) {
               const double r2 = inv_scale * l;
               const double r = sqrt(r2);
               const double q = r / R_AB;
@@ -223,7 +223,7 @@ namespace OpenBabel
               const double term2 = term * term;
               const double eattr = (-7.84 * q6) / term2 + ((-7.84 / term) + 14) / (q + 0.07);
               // devide by r here, this way we don't need to normalize the force in E_VDW
-              m_dE[k][l] = (epsilon * erep7 * eattr) / (R_AB * r);
+              m_dEvdw[k][l] = (epsilon * erep7 * eattr) / (R_AB * r);
             }
           }
         }
@@ -240,13 +240,13 @@ namespace OpenBabel
         double alpha = r2 * m_scale;
         const unsigned int index = floor(alpha);
         alpha -= index;
-        return m_values.at(k).at(index) + alpha * (m_values.at(k).at(index+1) - m_values.at(k).at(index));
+        return m_vdwValues.at(k).at(index) + alpha * (m_vdwValues.at(k).at(index+1) - m_vdwValues.at(k).at(index));
       }
 
       double dE(int Ti, int Tj, double r2) const
       {
         const unsigned int index = floor(r2 * m_scale);
-        return m_dE.at(key(Ti, Tj)).at(index);
+        return m_dEvdw.at(key(Ti, Tj)).at(index);
       }
     private:
       inline unsigned int key(int Ti, int Tj) const
@@ -272,10 +272,216 @@ namespace OpenBabel
  
       std::vector<OBFFParameter>                        m_parameters;
       double                                            m_scale;
-      std::map<unsigned int, std::vector<double> >      m_values;
-      std::map<unsigned int, std::vector<double> >      m_dE;
+      std::map<unsigned int, std::vector<double> >      m_vdwValues;
+      std::map<unsigned int, std::vector<double> >      m_dEvdw;
   };
 
+  class NonBondedLookupTable
+  {
+    public:
+      NonBondedLookupTable(const std::vector<int> &uniqueTypes, const std::vector<OBFFParameter> &vdwParameters, 
+          int scale, double rcut) : m_scale(scale)
+      {
+        rcut += 1.0;
+        double inv_scale = 1.0 / scale;
+        m_parameters = vdwParameters;
+            
+        unsigned int size = scale * rcut * rcut;
+
+        for (unsigned int i = 0; i < uniqueTypes.size(); ++i) {
+          for (unsigned int j = 0; j < uniqueTypes.size(); ++j) {
+            OBFFParameter *parameter_a = findParameter(uniqueTypes[i]);
+            OBFFParameter *parameter_b = findParameter(uniqueTypes[j]);
+            if (!parameter_a || !parameter_b) {
+              continue;
+            }
+
+            const double alpha_a = parameter_a->_dpar[0];
+            const double Na      = parameter_a->_dpar[1];
+            const double Aa      = parameter_a->_dpar[2];
+            const double Ga      = parameter_a->_dpar[3];
+            const double aDA     = parameter_a->_ipar[0];
+      
+            const double alpha_b = parameter_b->_dpar[0];
+            const double Nb      = parameter_b->_dpar[1];
+            const double Ab      = parameter_b->_dpar[2];
+            const double Gb      = parameter_b->_dpar[3];
+            const double bDA     = parameter_b->_ipar[0];
+      
+            //these calculations only need to be done once for each pair, 
+            //we do them now and save them for later use
+            double R_AA, R_BB, g_AB, g_AB2, epsilon;
+            double R_AB, R_AB2, R_AB4, R_AB6, R_AB7, sqrt_a, sqrt_b;
+ 
+            R_AA = Aa * pow(alpha_a, 0.25);
+            R_BB = Ab * pow(alpha_b, 0.25);
+            sqrt_a = sqrt(alpha_a / Na);
+            sqrt_b = sqrt(alpha_b / Nb);
+      
+            if ((aDA == 1) || (bDA == 1)) { // hydrogen bond donor
+              R_AB = 0.5 * (R_AA + R_BB);
+              R_AB2 = R_AB * R_AB;
+              R_AB4 = R_AB2 * R_AB2;
+              R_AB6 = R_AB4 * R_AB2;
+        
+              if (aDA + bDA == 3) { // hydrogen bond acceptor
+                epsilon = 0.5 * (181.16 * Ga * Gb * alpha_a * alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
+                // R_AB is scaled to 0.8 for D-A interactions. The value used in the calculation of epsilon is not scaled. 
+                R_AB = 0.8 * R_AB;
+              } else
+                epsilon = (181.16 * Ga * Gb * alpha_a * alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
+	
+              R_AB2 = R_AB * R_AB;
+              R_AB4 = R_AB2 * R_AB2;
+              R_AB6 = R_AB4 * R_AB2;
+              R_AB7 = R_AB6 * R_AB;
+            } else {
+              g_AB = (R_AA - R_BB) / ( R_AA + R_BB);
+              g_AB2 = g_AB * g_AB;
+              R_AB =  0.5 * (R_AA + R_BB) * (1.0 + 0.2 * (1.0 - exp(-12.0 * g_AB2)));
+              R_AB2 = R_AB * R_AB;
+              R_AB4 = R_AB2 * R_AB2;
+              R_AB6 = R_AB4 * R_AB2;
+              R_AB7 = R_AB6 * R_AB;
+              epsilon = (181.16 * Ga * Gb * alpha_a * alpha_b) / (sqrt_a + sqrt_b) * (1.0 / R_AB6);
+            }
+            
+            unsigned int k = key(uniqueTypes[i], uniqueTypes[j]);
+           
+            m_vdwValues[k].resize(scale * rcut * rcut);
+            for (unsigned int l = 0; l < m_vdwValues[k].size(); ++l) {
+              const double r2 = inv_scale * l;
+              const double r = sqrt(r2);
+              const double rab7 = r2 * r2 * r2 * r;
+              const double erep = (1.07 * R_AB) / (r + 0.07 * R_AB);
+              const double erep7 = erep*erep*erep*erep*erep*erep*erep;
+              const double eattr = (((1.12 * R_AB7) / (rab7 + 0.12 * R_AB7)) - 2.0);
+              m_vdwValues[k][l] = epsilon * erep7 * eattr;
+            }
+            
+            m_dEvdw[k].resize(scale * rcut * rcut);
+            for (unsigned int l = 0; l < m_dEvdw[k].size(); ++l) {
+              const double r2 = inv_scale * l;
+              const double r = sqrt(r2);
+              const double q = r / R_AB;
+              const double q6 = q*q*q*q*q*q;
+              const double q7 = q6 * q;
+              const double erep = 1.07 / (q + 0.07); 
+              const double erep7 = erep*erep*erep*erep*erep*erep*erep;
+              const double term = q7 + 0.12;
+              const double term2 = term * term;
+              const double eattr = (-7.84 * q6) / term2 + ((-7.84 / term) + 14) / (q + 0.07);
+              // devide by r here, this way we don't need to normalize the force in E_VDW
+              m_dEvdw[k][l] = (epsilon * erep7 * eattr) / (R_AB * r);
+            }
+
+            /* 
+            m_vdwValues[k].resize(size);
+            m_dEvdw[k].resize(size);
+            //m_vdwDeltas[k].resize(size+1);
+            for (unsigned int l = 0; l < size; ++l) {
+              // shared
+              const double r2 = inv_scale * l;
+              const double r = sqrt(r2);
+              // E
+              const double rab7 = r2 * r2 * r2 * r;
+              double erep = (1.07 * R_AB) / (r + 0.07 * R_AB);
+              double erep7 = erep*erep*erep*erep*erep*erep*erep;
+              double eattr = (((1.12 * R_AB7) / (rab7 + 0.12 * R_AB7)) - 2.0);
+              m_vdwValues[k][l] = epsilon * erep7 * eattr;
+              // dE
+              const double q = r / R_AB;
+              const double q6 = q*q*q*q*q*q;
+              const double q7 = q6 * q;
+              erep = 1.07 / (q + 0.07); 
+              erep7 = erep*erep*erep*erep*erep*erep*erep;
+              const double term = q7 + 0.12;
+              const double term2 = term * term;
+              eattr = (-7.84 * q6) / term2 + ((-7.84 / term) + 14) / (q + 0.07);
+              // devide by r here, this way we don't need to normalize the force in E_VDW
+              m_dEvdw[k][l] = (epsilon * erep7 * eattr) / (R_AB * r);
+              // /\E
+              if (l > 0) {
+                m_vdwDeltas[k][l-1] = m_vdwValues.at(k).at(l) - m_vdwValues.at(k).at(l-1);
+              }
+            }
+              */
+          }
+        }
+        
+        m_eleValues.resize(size);
+        //m_eleDeltas.resize(size);
+        m_dEele.resize(scale * rcut * rcut);
+        for (unsigned int i = 0; i < size; ++i) {
+          double r2 = inv_scale * i;
+          double r = sqrt(r2);
+          // E
+          m_eleValues[i] = 332.0716 / (r + 0.05);
+          // dE
+          m_dEele[i] = -332.0716 / (r2 * r);
+          // /\E
+          //if (i > 0) {
+          //  m_eleDeltas[i-1] = m_eleValues.at(i) - m_eleValues.at(i-1);
+          //}
+        }
+
+        //cout << "----- VdwLookupTable -----" << endl;
+        //cout << "    scale = " << scale << "  rcut = " << rcut << endl;
+        //cout << "    # unique types = " << uniqueTypes.size() << endl;
+        //cout << "    size = " << 2 * uniqueTypes.size() * rcut * rcut * scale * sizeof(double) << endl; 
+      }
+
+      double value(int Ti, int Tj, double r2, double QiQj) const
+      {
+        const unsigned int k = key(Ti, Tj);
+        double alpha = r2 * m_scale;
+        const unsigned int index = floor(alpha);
+        alpha -= index;
+
+        //return m_vdwValues.at(k).at(index) + alpha * m_vdwDeltas.at(k).at(index) +
+        //       QiQj * ( m_eleValues.at(index) + alpha * m_eleDeltas.at(index) );
+        return m_vdwValues.at(k).at(index) + alpha * (m_vdwValues.at(k).at(index+1) - m_vdwValues.at(k).at(index)) +
+               QiQj * ( m_eleValues.at(index) + alpha * (m_eleValues.at(index+1) - m_eleValues.at(index)) );
+      }
+
+      double dE(int Ti, int Tj, double r2, double QiQj) const
+      {
+        const unsigned int index = floor(r2 * m_scale);
+        return m_dEvdw.at(key(Ti, Tj)).at(index) + QiQj * m_dEele.at(index);
+      }
+    private:
+      inline unsigned int key(int Ti, int Tj) const
+      {
+        if (Ti > Tj)
+          return 1000 * Ti + Tj;
+        else
+          return 1000 * Tj + Ti;
+      }
+
+      OBFFParameter* findParameter(int a)
+      {
+        OBFFParameter *par;
+
+        for (unsigned int idx=0; idx < m_parameters.size(); idx++)
+          if (a == m_parameters[idx].a) {
+            par = &m_parameters[idx];
+            return par;
+          }
+
+        return 0;
+      }
+ 
+      double                                            m_scale;
+      // vdw
+      std::vector<OBFFParameter>                        m_parameters;
+      std::map<unsigned int, std::vector<double> >      m_vdwValues;
+      std::map<unsigned int, std::vector<double> >      m_dEvdw;
+      //std::map<unsigned int, std::vector<double> >      m_vdwDeltas;
+      // ele
+      std::vector<double>       m_eleValues;  
+      //std::vector<double>       m_eleDeltas;  
+      std::vector<double>       m_dEele; 
+  };
 
 
 
@@ -302,19 +508,25 @@ namespace OpenBabel
       energy += E_StrBnd<true>();
       energy += E_Torsion<true>();
       energy += E_OOP<true>();
+      /*
       energy += E_VDW<true>();
       energy += E_Electrostatic<true>();
+      */
+      energy += E_NonBonded<true>();
     } else {
       energy  = E_Bond<false>();
       energy += E_Angle<false>();
       energy += E_StrBnd<false>();
       energy += E_Torsion<false>();
       energy += E_OOP<false>();
+      /*
       energy += E_VDW<false>();
       energy += E_Electrostatic<false>();
+      */
+      energy += E_NonBonded<false>();
     }
 
-    m_vdwNbrList->update();
+    //m_vdwNbrList->update();
     m_eleNbrList->update();
 
     IF_OBFF_LOGLVL_MEDIUM {
@@ -907,8 +1119,8 @@ namespace OpenBabel
         
         if (gradients) {
           const double dE = m_vdwTable->dE(m_atomTypes.at(atom->GetIdx()-1), m_atomTypes.at(nbrs[i]->GetIdx()-1), rab2);
-          Eigen::Vector3d Fb( Eigen::Vector3d(atom->GetVector().AsArray()) - 
-                              Eigen::Vector3d(nbrs[i]->GetVector().AsArray()) );
+          Eigen::Vector3d Fb( Eigen::Vector3d(m_coords + 3 * (atom->GetIdx()-1) ) - 
+                              Eigen::Vector3d(m_coords + 3 * (nbrs[i]->GetIdx()-1) ) );
           Fb *= dE;
           Eigen::Vector3d Fa(-Fb);
           AddGradient(Fa.data(), atom->GetIdx());
@@ -963,8 +1175,8 @@ namespace OpenBabel
         double rab2 = m_eleNbrList->r2(i);
         if (gradients) {
           const double dE = QiQj * m_eleTable->dE(rab2);
-          Eigen::Vector3d Fb( Eigen::Vector3d(atom->GetVector().AsArray()) - 
-                              Eigen::Vector3d(nbrs[i]->GetVector().AsArray()) );
+          Eigen::Vector3d Fb( Eigen::Vector3d(m_coords + 3 * (atom->GetIdx()-1) ) - 
+                              Eigen::Vector3d(m_coords + 3 * (nbrs[i]->GetIdx()-1) ) );
           Fb *= dE;
           Eigen::Vector3d Fa(-Fb);
           AddGradient(Fa.data(), atom->GetIdx());
@@ -992,7 +1204,62 @@ namespace OpenBabel
 
     return energy;
   }
-  
+ 
+  template<bool gradients>
+  double OBForceFieldMMFF94::E_NonBonded()
+  {
+    double energy = 0.0;
+    
+    IF_OBFF_LOGLVL_HIGH {
+      OBFFLog("\nN O N   B O N D E D\n\n");
+      OBFFLog("ATOM TYPES\n");
+      OBFFLog(" I    J        Rij       ENERGY\n");
+      OBFFLog("-------------------------------\n");
+      //       XX   XX     -000.000  -000.000  -000.000  -000.000
+    }
+
+    FOR_ATOMS_OF_MOL (atom, _mol) {
+      std::vector<OBAtom*> nbrs = m_eleNbrList->nbrs(&*atom);
+
+      for (unsigned int i = 0; i < nbrs.size(); ++i) {
+        double rab2 = m_eleNbrList->r2(i);
+       
+        double QiQj = atom->GetPartialCharge() * nbrs[i]->GetPartialCharge();
+        if (m_oneFourList->IsOneFour(atom->GetIdx(), nbrs[i]->GetIdx()))
+          QiQj *= 0.75;
+ 
+        if (gradients) {
+          const double dE = m_nbTable->dE(m_atomTypes.at(atom->GetIdx()-1), 
+                                           m_atomTypes.at(nbrs[i]->GetIdx()-1), rab2, QiQj);
+          Eigen::Vector3d Fb( Eigen::Vector3d(m_coords + 3 * (atom->GetIdx()-1) ) - 
+                              Eigen::Vector3d(m_coords + 3 * (nbrs[i]->GetIdx()-1) ) );
+          Fb *= dE;
+          Eigen::Vector3d Fa(-Fb);
+          AddGradient(Fa.data(), atom->GetIdx());
+          AddGradient(Fb.data(), nbrs[i]->GetIdx());
+        }
+      
+        double e = m_nbTable->value(m_atomTypes.at(atom->GetIdx()-1), 
+                                     m_atomTypes.at(nbrs[i]->GetIdx()-1), rab2, QiQj);
+        energy += e;
+
+        IF_OBFF_LOGLVL_HIGH {
+          snprintf(_logbuf, BUFF_SIZE, "%2d   %2d     %8.3f  %8.3f\n", 
+                atoi(atom->GetType()), atoi(nbrs[i]->GetType()), sqrt(rab2), e);
+          OBFFLog(_logbuf);
+        }
+      }
+    }
+
+    IF_OBFF_LOGLVL_MEDIUM {
+      snprintf(_logbuf, BUFF_SIZE, "     TOTAL NON BONDED ENERGY = %8.5f %s\n", energy, GetUnit().c_str());
+      OBFFLog(_logbuf);
+    }
+    
+    return energy;
+  }
+
+ 
   //
   // OBForceFieldMMFF member functions
   //
@@ -3569,21 +3836,20 @@ namespace OpenBabel
 
   bool OBForceFieldMMFF94::SetupNonBonded()
   {
-    // create the atom list for OBNbrList constructor
-    std::vector<OBAtom*> atoms;
-    FOR_ATOMS_OF_MOL (atom, _mol)
-      atoms.push_back(&*atom);
-   
+    m_coords = _mol.GetCoordinates();
+
+    _rele = _rvdw = 12.0;
+
     IF_OBFF_LOGLVL_LOW
       OBFFLog("SETTING UP VAN DER WAALS CALCULATIONS...\n");
     // create the vdw nbr list
-    if (m_vdwNbrList)
-      delete m_vdwNbrList;
-    m_vdwNbrList = new OBNbrList(atoms, _rvdw);
+    //if (m_vdwNbrList)
+    //  delete m_vdwNbrList;
+    //m_vdwNbrList = new OBNbrList(&_mol, _rvdw);
 
     // initialize the vdw lookup table
-    if (m_vdwTable)
-      delete m_vdwTable;
+    //if (m_vdwTable)
+    //  delete m_vdwTable;
     std::vector<int> uniqueTypes;
     for (std::vector<int>::iterator ti = m_atomTypes.begin(); ti != m_atomTypes.end(); ++ti) {
       bool add = true;
@@ -3594,19 +3860,21 @@ namespace OpenBabel
       if (add)
         uniqueTypes.push_back(*ti);
     }
-    m_vdwTable = new VdwLookupTable(uniqueTypes, _ffvdwparams, 10, _rvdw);
+    //m_vdwTable = new VdwLookupTable(uniqueTypes, _ffvdwparams, 10, _rvdw);
 
     IF_OBFF_LOGLVL_LOW
       OBFFLog("SETTING UP ELECTROSTATIC CALCULATIONS...\n");
     // create the ielectrostatic nbr list
     if (m_eleNbrList)
       delete m_eleNbrList;
-    m_eleNbrList = new OBNbrList(atoms, _rele);
+    m_eleNbrList = new OBNbrList(&_mol, _rele);
  
     // initialize the electrostatic lookup table
-    if (m_eleTable)
-     delete m_eleTable;
-    m_eleTable = new ElectrostaticLookupTable(10, _rele);
+    //if (m_eleTable)
+    // delete m_eleTable;
+    //m_eleTable = new ElectrostaticLookupTable(10, _rele);
+    
+    m_nbTable = new NonBondedLookupTable(uniqueTypes, _ffvdwparams, 10, _rele);
    
     // initialize the 1-4 cache 
     if (m_oneFourList)
@@ -4347,6 +4615,7 @@ namespace OpenBabel
       //        passed = false;
 
       // OBFF_EVDW
+      /*
       numgrad = NumericalDerivative(&*a, OBFF_EVDW);
       ClearGradients();
       E_VDW(); // compute
@@ -4367,6 +4636,22 @@ namespace OpenBabel
       err = ValidateGradientError(numgrad, anagrad);
 
       snprintf(_logbuf, BUFF_SIZE, "    electro (%7.3f, %7.3f, %7.3f)  (%7.3f, %7.3f, %7.3f)  (%5.2f, %5.2f, %5.2f)\n", numgrad.x(), numgrad.y(), numgrad.z(), 
+              anagrad.x(), anagrad.y(), anagrad.z(), err.x(), err.y(), err.z());
+      OBFFLog(_logbuf);
+      if (err.x() > 5.0 || err.y() > 5.0 || err.z() > 5.0)
+        passed = false;
+      */
+
+      // OBFF_NONBONED
+      vector3 numgradVdw = NumericalDerivative(&*a, OBFF_EVDW);
+      vector3 numgradEle = NumericalDerivative(&*a, OBFF_EELECTROSTATIC);
+      numgrad = numgradVdw + numgradEle;
+      ClearGradients();
+      E_NonBonded<true>(); // compute
+      anagrad.Set(_gradientPtr[coordIdx], _gradientPtr[coordIdx+1], _gradientPtr[coordIdx+2]);
+      err = ValidateGradientError(numgrad, anagrad);
+
+      snprintf(_logbuf, BUFF_SIZE, " non-bonded (%7.3f, %7.3f, %7.3f)  (%7.3f, %7.3f, %7.3f)  (%5.2f, %5.2f, %5.2f)\n", numgrad.x(), numgrad.y(), numgrad.z(), 
               anagrad.x(), anagrad.y(), anagrad.z(), err.x(), err.y(), err.z());
       OBFFLog(_logbuf);
       if (err.x() > 5.0 || err.y() > 5.0 || err.z() > 5.0)

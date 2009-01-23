@@ -43,7 +43,7 @@ namespace OpenBabel
       typedef std::vector<OBAtom*>::iterator atom_iter;
 
     public:
-      OBNbrList(const std::vector<OBAtom*> atoms, double rcut, int boxSize = 1);
+      OBNbrList(OBMol *mol, double rcut, int boxSize = 1);
       void update();
       
       std::vector<OBAtom*> nbrs(OBAtom *atom);
@@ -112,9 +112,10 @@ namespace OpenBabel
       void initCells();
       void initOffsetMap();
 
-      std::vector<OBAtom*>                m_atoms;
+      OBMol                              *m_mol;
+      double                             *m_coords;
       std::vector<Eigen::Vector3i>        m_offsetMap;
-      double                              m_rcut;
+      double                              m_rcut, m_rcut2;
       double                              m_edgeLength;
       int                                 m_boxSize;
       int                                 m_updateCounter;

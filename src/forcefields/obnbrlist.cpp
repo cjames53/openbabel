@@ -18,14 +18,18 @@ GNU General Public License for more details.
 
 #include "obnbrlist.h"
 
+using namespace std;
+
 namespace OpenBabel
 {
 
-  OBNbrList::OBNbrList(const std::vector<OBAtom*> atoms, double rcut, int boxSize) : m_atoms(atoms), m_rcut(rcut)
+  OBNbrList::OBNbrList(OBMol* mol, double rcut, int boxSize) : m_mol(mol), m_rcut(rcut)
   {
+    m_rcut2 = rcut*rcut;
     m_boxSize = boxSize;
     m_edgeLength = m_rcut / m_boxSize;
     m_updateCounter = 0;
+    m_coords = m_mol->GetCoordinates();
  
     initOffsetMap();
     initOneTwo();
@@ -34,16 +38,17 @@ namespace OpenBabel
 
   std::vector<OBAtom*> OBNbrList::nbrs(OBAtom *atom)
   {
-    Eigen::Vector3d atomPos(atom->GetVector().AsArray());
+    Eigen::Vector3d atomPos(m_coords + 3 * (atom->GetIdx()-1) );
     m_r2.clear();
-    m_r2.reserve(m_atoms.size() / m_xyDim);
+    m_r2.reserve(m_mol->NumAtoms());
     std::vector<OBAtom*> atoms;
-    atoms.reserve(m_atoms.size() / m_xyDim);
-    Eigen::Vector3i index(cellIndexes(Eigen::Vector3d(atom->GetVector().AsArray())));
-    const double rcut2 = m_rcut * m_rcut;
+    atoms.reserve(m_mol->NumAtoms());
+    Eigen::Vector3i index(cellIndexes(atomPos));
 
     std::vector<Eigen::Vector3i>::const_iterator i;
+    // Use the offset map to find neighboring cells
     for (i = m_offsetMap.begin(); i != m_offsetMap.end(); ++i) {
+      // add the offset to the cell index for atom's cell
       Eigen::Vector3i offset = index + *i;
  
       if (offset.x() < 0) continue;
@@ -64,7 +69,7 @@ namespace OpenBabel
           continue;
 
         const double R2 =  (Eigen::Vector3d((*j)->GetVector().AsArray())-atomPos).squaredNorm();
-        if (R2 > rcut2)
+        if (R2 > m_rcut2)
           continue;
 
         m_r2.push_back(R2);
@@ -87,20 +92,20 @@ namespace OpenBabel
 
   void OBNbrList::initOneTwo()
   {
-    m_oneTwo.resize(m_atoms.size());
-    m_oneThree.resize(m_atoms.size());
+    m_oneTwo.resize(m_mol->NumAtoms());
+    m_oneThree.resize(m_mol->NumAtoms());
 
-    for (atom_iter a = m_atoms.begin(); a != m_atoms.end(); ++a) {
-      FOR_NBORS_OF_ATOM (nbr1, *a) {
-        m_oneTwo[(*a)->GetIdx()-1].push_back(nbr1->GetIdx());
-        m_oneTwo[nbr1->GetIdx()-1].push_back((*a)->GetIdx());
+    FOR_ATOMS_OF_MOL (atom, m_mol) {
+      FOR_NBORS_OF_ATOM (nbr1, &*atom) {
+        m_oneTwo[atom->GetIdx()-1].push_back(nbr1->GetIdx());
+        m_oneTwo[nbr1->GetIdx()-1].push_back(atom->GetIdx());
             
         FOR_NBORS_OF_ATOM (nbr2, &*nbr1) {
-          if ((*a)->GetIdx() == nbr2->GetIdx())
+          if (atom->GetIdx() == nbr2->GetIdx())
             continue;
 
-          m_oneThree[(*a)->GetIdx()-1].push_back(nbr2->GetIdx());
-          m_oneThree[nbr2->GetIdx()-1].push_back((*a)->GetIdx());
+          m_oneThree[atom->GetIdx()-1].push_back(nbr2->GetIdx());
+          m_oneThree[nbr2->GetIdx()-1].push_back(atom->GetIdx());
         }
       }
     }
@@ -109,10 +114,10 @@ namespace OpenBabel
   void OBNbrList::initCells()
   {
     // find min & max
-    for (atom_iter i = m_atoms.begin(); i != m_atoms.end(); ++i) {
-      Eigen::Vector3d pos((*i)->GetVector().AsArray());
+    FOR_ATOMS_OF_MOL (atom, m_mol) {
+      Eigen::Vector3d pos(m_coords + 3 * (atom->GetIdx()-1) );
   
-      if ((*i)->GetIdx() == 1) {
+      if (atom->GetIdx() == 1) {
         m_min = m_max = pos;
       } else {
         if (pos.x() > m_max.x())
@@ -140,10 +145,12 @@ namespace OpenBabel
       
     // add atoms to their cells
     m_cells.clear();
-    m_cells.resize(m_xyDim * m_dim.z());
-    for (atom_iter i = m_atoms.begin(); i != m_atoms.end(); ++i) {
-      Eigen::Vector3d pos((*i)->GetVector().AsArray());
-      m_cells[cellIndex(pos)].push_back(*i);
+    // the last cell is always empty and can be used for all ghost cells
+    // in non-periodic boundary conditions.
+    m_cells.resize(m_xyDim * m_dim.z() + 1);
+    FOR_ATOMS_OF_MOL (atom, m_mol) {
+      Eigen::Vector3d pos(m_coords + 3 * (atom->GetIdx()-1) );
+      m_cells[cellIndex(pos)].push_back(&*atom);
     }
       
   }

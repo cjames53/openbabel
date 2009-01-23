@@ -82,6 +82,7 @@ namespace OpenBabel
   class OneFourList;
   class VdwLookupTable;
   class ElectrostaticLookupTable;
+  class NonBondedLookupTable;
   class OBForceFieldMMFF94: public OBForceField
   {
     protected:
@@ -211,11 +212,14 @@ namespace OpenBabel
 
       bool mmff94s;
  
-      std::vector<int>          m_atomTypes; 
+      std::vector<int>          m_atomTypes;
+      double                   *m_coords;
+
       OBNbrList                *m_vdwNbrList;
       OBNbrList                *m_eleNbrList;
       VdwLookupTable           *m_vdwTable;
       ElectrostaticLookupTable *m_eleTable;
+      NonBondedLookupTable     *m_nbTable;
       OneFourList              *m_oneFourList;
       
     public:
@@ -317,6 +321,8 @@ namespace OpenBabel
       { 
         return gradients ? E_Electrostatic<true>() : E_Electrostatic<false>(); 
       }
+ 
+      template<bool> double E_NonBonded();
       
       //! Validate MMFF94 using validation suite
       bool Validate();
