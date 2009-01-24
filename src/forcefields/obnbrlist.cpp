@@ -73,15 +73,21 @@ namespace OpenBabel
     for (i = m_offsetMap.begin(); i != m_offsetMap.end(); ++i) {
       // add the offset to the cell index for atom's cell
       Eigen::Vector3i offset = index + *i;
- 
+      // use the ghost map to handle indexes near border:
+      // a) periodic boundary conditions --> wrap around
+      // b) otherwise --> last empty cell
+      unsigned int cell = cellIndex(m_ghostMap.at(ghostIndex(offset)));
+
+
+      /* 
       if (offset.x() < 0) continue;
       if (offset.y() < 0) continue;
       if (offset.z() < 0) continue;
       if (offset.x() >= m_dim.x()) continue;
       if (offset.y() >= m_dim.y()) continue;
       if (offset.z() >= m_dim.z()) continue;
-
       unsigned int cell = cellIndex(offset);
+*/
       for (atom_iter j = m_cells[cell].begin(); j != m_cells[cell].end(); ++j) {
         // make sure to only return unique pairs
         if (atom->GetIdx() >= (*j)->GetIdx())
@@ -91,7 +97,7 @@ namespace OpenBabel
         if (IsOneThree(atom->GetIdx(), (*j)->GetIdx()))
           continue;
 
-        const double R2 =  (Eigen::Vector3d((*j)->GetVector().AsArray())-atomPos).squaredNorm();
+        const double R2 = (Eigen::Vector3d(m_coords + 3 * ((*j)->GetIdx()-1) ) - atomPos).squaredNorm();
         if (R2 > m_rcut2)
           continue;
 
@@ -159,6 +165,9 @@ namespace OpenBabel
           m_min.z() = pos.z();
       }
     }
+
+    m_min -= Eigen::Vector3d::Ones();
+    m_max += Eigen::Vector3d::Ones();
  
     // set the dimentions
     m_dim.x() = floor( (m_max.x() - m_min.x()) /  m_edgeLength) + 1;
@@ -180,25 +189,39 @@ namespace OpenBabel
 
   void OBNbrList::initOffsetMap()
   {
+    //cout << "initOffsetMap()" << endl;
     int dim = 2 * m_boxSize + 1;
     m_offsetMap.resize(dim * dim * dim);
     for (int i = 0; i < dim; ++i) 
       for (int j = 0; j < dim; ++j) 
-        for (int k = 0; k < dim; ++k) 
+        for (int k = 0; k < dim; ++k) {
           m_offsetMap[offsetIndex(i,j,k)] = Eigen::Vector3i(i - m_boxSize, j - m_boxSize, k - m_boxSize);
+          //cout << "  offset: " << m_offsetMap[offsetIndex(i,j,k)].x() << ", " <<
+          //                        m_offsetMap[offsetIndex(i,j,k)].y() << ", " <<
+          //                        m_offsetMap[offsetIndex(i,j,k)].z() << endl;
+        }
+
   }
 
   void OBNbrList::initGhostMap(bool periodic)
   {
+    //cout << "initGhostMap()" << endl;
     int xDim = 2 * m_boxSize + m_dim.x();
     int yDim = 2 * m_boxSize + m_dim.y();
     int zDim = 2 * m_boxSize + m_dim.z();
+
+    //cout << "xDim = " << xDim << endl;
+    //cout << "yDim = " << yDim << endl;
+    //cout << "zDim = " << zDim << endl;
+
+    //cout << "m_cells.size() = " << m_cells.size() << endl;
 
     m_ghostMap.resize(xDim * yDim * zDim);
     for (int i = -m_boxSize; i < m_dim.x() + m_boxSize; ++i)
       for (int j = -m_boxSize; j < m_dim.y() + m_boxSize; ++j)
         for (int k = -m_boxSize; k < m_dim.z() + m_boxSize; ++k) {
           unsigned int ghostCell = ghostIndex(i, j, k);
+          //cout << "ghostCell = " << ghostCell << endl;
 
           int u = i, v = j, w = k;
           if (periodic) {
@@ -221,12 +244,15 @@ namespace OpenBabel
             if ( (i < 0) || (j < 0) || (k < 0) || 
                   (i >= m_dim.x()) || (j >= m_dim.y()) || (k >= m_dim.z()) )  {
               // point to last cell which is always empty
-              u = 0;
-              v = m_dim.y() - 1;
-              w = m_dim.z() - 1;
+              u = m_cells.size() - 1;
+              v = 0;
+              w = 0;
             }
           } 
 
+          //cout << "  ghost: " << u << ", " << v << ", " << w << "  -->  " << cellIndex(u, v, w) << endl;
+
+ 
           m_ghostMap[ghostCell] = Eigen::Vector3i(u, v, w);
         }
 

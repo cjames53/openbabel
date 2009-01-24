@@ -98,6 +98,22 @@ namespace OpenBabel
         index.x() = floor( (pos.x() - m_min.x()) / m_edgeLength );
         index.y() = floor( (pos.y() - m_min.y()) / m_edgeLength );
         index.z() = floor( (pos.z() - m_min.z()) / m_edgeLength );
+        /*
+        if (index.x() < 0) 
+          index.x() = 0;
+        else if (index.x() >= m_dim.x()) 
+          index.x() = m_dim.x() - 1;
+        
+        if (index.y() < 0) 
+          index.y() = 0;
+        else if (index.y() >= m_dim.y()) 
+          index.y() = m_dim.y() - 1;
+        
+        if (index.z() < 0) 
+          index.z() = 0;
+        else if (index.z() >= m_dim.z()) 
+          index.z() = m_dim.z() - 1;
+        */
         return index;
       }
 
