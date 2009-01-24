@@ -37,16 +37,49 @@ GNU General Public License for more details.
 namespace OpenBabel
 {
 
+  /**
+   *  
+   *
+   *
+   *
+   */
   class OBNbrList
   {
     private:
       typedef std::vector<OBAtom*>::iterator atom_iter;
 
     public:
+      /**
+       * Constructor.
+       * @param mol The molecule containing the atoms
+       * @param rcut The cut-off distance.
+       * @param boxSize The number of cells per rcut distance.
+       */
       OBNbrList(OBMol *mol, double rcut, int boxSize = 1);
+      /**
+       * Update the cells. While minimizing or running MD simulations,
+       * atoms move and can go from on cell into the next. This function
+       * should be called every 10-20 iterations to make sure the cells
+       * stay accurate.
+       */
       void update();
-      
+      /**
+       * Get the near-neighbor atoms for @p atom. The squared distance is
+       * checked and is cached for later use (see r2() function). 
+       *
+       * Note: Atoms in relative 1-2 and 1-3 positions are not returned.
+       * The @p atom itself isn't added to the list.
+       *
+       * @param atom The atom for which to return the near-neighbors
+       * @return The near-neighbors for @p atom
+       */
       std::vector<OBAtom*> nbrs(OBAtom *atom);
+      /**
+       * Get the cached squared distance from the atom last used to call 
+       * nbrs to the atom with @p index in the returned vector.
+       * @param index The index for the atom in the vector of atoms returned by nbrs().
+       * @return The cached squared distance.
+       */
       inline double r2(unsigned int index) const
       {
         return m_r2.at(index);
@@ -61,11 +94,11 @@ namespace OpenBabel
 
       inline unsigned int ghostIndex(int i, int j, int k) const
       {
-        i += m_boxSize;
-        j += m_boxSize;
-        k += m_boxSize;
-        int xDim = 2 * m_boxSize + m_dim.x();
-        int yDim = 2 * m_boxSize + m_dim.y();
+        i += m_boxSize + 1;
+        j += m_boxSize + 1;
+        k += m_boxSize + 1;
+        int xDim = 2 * m_boxSize + m_dim.x() + 2;
+        int yDim = 2 * m_boxSize + m_dim.y() + 2;
         return i + j * xDim + k * xDim * yDim;
       }
 
@@ -98,25 +131,14 @@ namespace OpenBabel
         index.x() = floor( (pos.x() - m_min.x()) / m_edgeLength );
         index.y() = floor( (pos.y() - m_min.y()) / m_edgeLength );
         index.z() = floor( (pos.z() - m_min.z()) / m_edgeLength );
-        /*
-        if (index.x() < 0) 
-          index.x() = 0;
-        else if (index.x() >= m_dim.x()) 
-          index.x() = m_dim.x() - 1;
-        
-        if (index.y() < 0) 
-          index.y() = 0;
-        else if (index.y() >= m_dim.y()) 
-          index.y() = m_dim.y() - 1;
-        
-        if (index.z() < 0) 
-          index.z() = 0;
-        else if (index.z() >= m_dim.z()) 
-          index.z() = m_dim.z() - 1;
-        */
         return index;
       }
 
+      /**
+       * @param i Index for the first atom (indexed from 1)
+       * @param j Index for the first atom (indexed from 1)
+       * @return True if atoms with index @p i and @p j are bonded (1-2)
+       */
       inline bool IsOneTwo(unsigned int i, unsigned int j) const 
       {
         --i;
@@ -128,6 +150,11 @@ namespace OpenBabel
         return false;
       }
  
+      /**
+       * @param i Index for the first atom (indexed from 1)
+       * @param j Index for the first atom (indexed from 1)
+       * @return True if atoms with index @p i and @p j are in a 1-3 position
+       */
       inline bool IsOneThree(unsigned int i, unsigned int j) const
       {
         --i;
@@ -139,6 +166,9 @@ namespace OpenBabel
         return false;
       }
 
+      /**
+       * Initialize the 1-2 and 1-3 cache.
+       */
       void initOneTwo();
       void initCells();
       void initOffsetMap();

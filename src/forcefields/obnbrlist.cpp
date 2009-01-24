@@ -44,28 +44,6 @@ namespace OpenBabel
     m_r2.reserve(m_mol->NumAtoms());
     std::vector<OBAtom*> atoms;
     atoms.reserve(m_mol->NumAtoms());
-   
-   /* 
-    if (m_mol->NumAtoms() < 100) {
-      FOR_ATOMS_OF_MOL (nbr, m_mol) {
-        // make sure to only return unique pairs
-        if (atom->GetIdx() >= nbr->GetIdx())
-          continue;
-        if (IsOneTwo(atom->GetIdx(), nbr->GetIdx()))
-          continue;
-        if (IsOneThree(atom->GetIdx(), nbr->GetIdx()))
-          continue;
-
-        const double R2 =  (Eigen::Vector3d(nbr->GetVector().AsArray())-atomPos).squaredNorm();
-        if (R2 > m_rcut2)
-          continue;
-
-        m_r2.push_back(R2);
-        atoms.push_back(&*nbr);
-      }
-      return atoms;
-    }
-*/    
     Eigen::Vector3i index(cellIndexes(atomPos));
 
     std::vector<Eigen::Vector3i>::const_iterator i;
@@ -78,16 +56,6 @@ namespace OpenBabel
       // b) otherwise --> last empty cell
       unsigned int cell = cellIndex(m_ghostMap.at(ghostIndex(offset)));
 
-
-      /* 
-      if (offset.x() < 0) continue;
-      if (offset.y() < 0) continue;
-      if (offset.z() < 0) continue;
-      if (offset.x() >= m_dim.x()) continue;
-      if (offset.y() >= m_dim.y()) continue;
-      if (offset.z() >= m_dim.z()) continue;
-      unsigned int cell = cellIndex(offset);
-*/
       for (atom_iter j = m_cells[cell].begin(); j != m_cells[cell].end(); ++j) {
         // make sure to only return unique pairs
         if (atom->GetIdx() >= (*j)->GetIdx())
@@ -114,7 +82,7 @@ namespace OpenBabel
     m_updateCounter++;
 
     if (m_updateCounter > 10) {
-      initCells();    
+      updateCells();    
       m_updateCounter = 0;
     }
   }
@@ -166,15 +134,17 @@ namespace OpenBabel
       }
     }
 
-    m_min -= Eigen::Vector3d::Ones();
-    m_max += Eigen::Vector3d::Ones();
- 
     // set the dimentions
     m_dim.x() = floor( (m_max.x() - m_min.x()) /  m_edgeLength) + 1;
     m_dim.y() = floor( (m_max.y() - m_min.y()) /  m_edgeLength) + 1;
     m_dim.z() = floor( (m_max.z() - m_min.z()) /  m_edgeLength) + 1;
     m_xyDim = m_dim.x() * m_dim.y();
-      
+    
+    updateCells();
+  }
+  
+  void OBNbrList::updateCells()
+  {      
     // add atoms to their cells
     m_cells.clear();
     // the last cell is always empty and can be used for all ghost cells
@@ -204,39 +174,30 @@ namespace OpenBabel
 
   void OBNbrList::initOffsetMap()
   {
-    //cout << "initOffsetMap()" << endl;
     int dim = 2 * m_boxSize + 1;
-    m_offsetMap.resize(dim * dim * dim);
+    m_offsetMap.clear();
     for (int i = 0; i < dim; ++i) 
       for (int j = 0; j < dim; ++j) 
         for (int k = 0; k < dim; ++k) {
-          m_offsetMap[offsetIndex(i,j,k)] = Eigen::Vector3i(i - m_boxSize, j - m_boxSize, k - m_boxSize);
-          //cout << "  offset: " << m_offsetMap[offsetIndex(i,j,k)].x() << ", " <<
-          //                        m_offsetMap[offsetIndex(i,j,k)].y() << ", " <<
-          //                        m_offsetMap[offsetIndex(i,j,k)].z() << endl;
+          Eigen::Vector3i index(i - m_boxSize, j - m_boxSize, k - m_boxSize);
+          if (insideShpere(index))
+            m_offsetMap.push_back( index );
         }
 
   }
 
   void OBNbrList::initGhostMap(bool periodic)
   {
-    //cout << "initGhostMap()" << endl;
-    int xDim = 2 * m_boxSize + m_dim.x();
-    int yDim = 2 * m_boxSize + m_dim.y();
-    int zDim = 2 * m_boxSize + m_dim.z();
+    int xDim = 2 * m_boxSize + m_dim.x() + 2;
+    int yDim = 2 * m_boxSize + m_dim.y() + 2;
+    int zDim = 2 * m_boxSize + m_dim.z() + 2;
 
-    //cout << "xDim = " << xDim << endl;
-    //cout << "yDim = " << yDim << endl;
-    //cout << "zDim = " << zDim << endl;
-
-    //cout << "m_cells.size() = " << m_cells.size() << endl;
-
+    int start = - m_boxSize - 1;
     m_ghostMap.resize(xDim * yDim * zDim);
-    for (int i = -m_boxSize; i < m_dim.x() + m_boxSize; ++i)
-      for (int j = -m_boxSize; j < m_dim.y() + m_boxSize; ++j)
-        for (int k = -m_boxSize; k < m_dim.z() + m_boxSize; ++k) {
+    for (int i = start; i < m_dim.x() - start; ++i)
+      for (int j = start; j < m_dim.y() - start; ++j)
+        for (int k = start; k < m_dim.z() - start; ++k) {
           unsigned int ghostCell = ghostIndex(i, j, k);
-          //cout << "ghostCell = " << ghostCell << endl;
 
           int u = i, v = j, w = k;
           if (periodic) {
@@ -265,9 +226,6 @@ namespace OpenBabel
             }
           } 
 
-          //cout << "  ghost: " << u << ", " << v << ", " << w << "  -->  " << cellIndex(u, v, w) << endl;
-
- 
           m_ghostMap[ghostCell] = Eigen::Vector3i(u, v, w);
         }
 
