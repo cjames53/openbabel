@@ -171,6 +171,7 @@ namespace OpenBabel
        */
       void initOneTwo();
       void initCells();
+      void updateCells();
       void initOffsetMap();
       void initGhostMap(bool periodic = false);
       bool insideShpere(const Eigen::Vector3i &index);

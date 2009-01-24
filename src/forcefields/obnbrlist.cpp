@@ -82,6 +82,7 @@ namespace OpenBabel
     m_updateCounter++;
 
     if (m_updateCounter > 10) {
+      initCells();
       updateCells();    
       m_updateCounter = 0;
     }
