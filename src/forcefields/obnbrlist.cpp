@@ -187,6 +187,21 @@ namespace OpenBabel
       
   }
 
+  bool OBNbrList::insideShpere(const Eigen::Vector3i &index)
+  {
+    int i = abs(index.x());
+    if (i) i--;
+    int j = abs(index.y());
+    if (j) j--;
+    int k = abs(index.z());
+    if (k) k--;
+
+    if (Eigen::Vector3i(i, j, k).squaredNorm() < m_rcut2)
+      return true;
+
+    return false; 
+  }
+
   void OBNbrList::initOffsetMap()
   {
     //cout << "initOffsetMap()" << endl;

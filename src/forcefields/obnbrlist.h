@@ -143,6 +143,7 @@ namespace OpenBabel
       void initCells();
       void initOffsetMap();
       void initGhostMap(bool periodic = false);
+      bool insideShpere(const Eigen::Vector3i &index);
 
       OBMol                              *m_mol;
       double                             *m_coords;
