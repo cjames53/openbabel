@@ -26,6 +26,8 @@ GNU General Public License for more details.
 #include <openbabel/builder.h>
 #include <openbabel/math/matrix3x3.h>
 
+#include <openbabel/stereo/tetrahedral.h>
+
 #include <sstream>
 #include <set>
 
@@ -834,6 +836,16 @@ namespace OpenBabel
     return((OBAtom*)_vatom[idx-1]);
   }
 
+  OBAtom *OBMol::GetAtomById(unsigned long id) const
+  {
+    if (id >= _atomIds.size()) {
+      obErrorLog.ThrowError(__FUNCTION__, "Requested Atom Out of Range", obDebug);
+      return((OBAtom*)NULL);
+    }
+
+    return((OBAtom*)_atomIds[id]);
+  }
+
   OBAtom *OBMol::GetFirstAtom() const
   {
     return((_vatom.empty()) ? (OBAtom*)NULL : (OBAtom*)_vatom[0]);
@@ -1166,10 +1178,13 @@ namespace OpenBabel
     OBAtom *atom;
     OBBond *bond;
 
+    cout << "OBMol::operator=" << endl;
+
     Clear();
     BeginModify();
 
     _vatom.reserve(src.NumAtoms());
+    _atomIds.reserve(src.NumAtoms());
     _vbond.reserve(src.NumBonds());
 
     for (atom = src.BeginAtom(i);atom;atom = src.NextAtom(i))
@@ -1246,6 +1261,13 @@ namespace OpenBabel
         GetAtom(atom->GetIdx())->SetData(pCopiedData);
       }
     }
+    FOR_ATOMS_OF_MOL (atom, src) {
+      if (atom->HasData(OBGenericDataType::StereoData)) {
+        OBTetrahedralStereo* cd = (OBTetrahedralStereo*) atom->GetData(OBGenericDataType::StereoData);
+        OBGenericData* pCopiedData = cd->Clone(NULL); // parent not used in OBChiralData::Clone()
+        GetAtom(atom->GetIdx())->SetData(pCopiedData);
+      }
+    }
  
     return(*this);
   }
@@ -1318,6 +1340,7 @@ namespace OpenBabel
         *j = NULL;
       }
 
+    _atomIds.clear();
     _natoms = _nbonds = 0;
 
     //Delete residues
@@ -1469,17 +1492,36 @@ namespace OpenBabel
       }
   }
 
+  OBAtom *OBMol::NewAtom()
+  {
+    return NewAtom(_atomIds.size());
+  }
+
   //! \brief Instantiate a New Atom and add it to the molecule
   //!
   //! Checks bond_queue for any bonds that should be made to the new atom
   //! and updates atom indexes.
-  OBAtom *OBMol::NewAtom()
+  OBAtom *OBMol::NewAtom(unsigned long id)
   {
     //   BeginModify();
 
+    // resize _atomIds if needed
+    if (id >= _atomIds.size()) {
+      unsigned int size = _atomIds.size();
+      _atomIds.resize(id+1);
+      for (unsigned long i = size; i < id; ++i)
+        _atomIds[i] = (OBAtom*)NULL;
+    }
+
+    if (_atomIds.at(id))
+      return (OBAtom*)NULL;
+ 
     OBAtom *obatom = CreateAtom();
     obatom->SetIdx(_natoms+1);
     obatom->SetParent(this);
+    
+    _atomIds[id] = obatom;
+    obatom->SetId(id);
 
 #define OBAtomIncrement 100
 
@@ -1491,6 +1533,7 @@ namespace OpenBabel
           *j = (OBAtom*)NULL;
       }
 #undef OBAtomIncrement
+
 
     _vatom[_natoms] = obatom;
     _natoms++;
@@ -1565,10 +1608,24 @@ namespace OpenBabel
   {
     //    BeginModify();
 
+    unsigned long id = atom.GetId();
     OBAtom *obatom = CreateAtom();
     *obatom = atom;
     obatom->SetIdx(_natoms+1);
     obatom->SetParent(this);
+
+    if (id >= _atomIds.size()) {
+      unsigned int size = _atomIds.size();
+      _atomIds.resize(id+1);
+      for (unsigned long i = size; i < id; ++i)
+        _atomIds[i] = (OBAtom*)NULL;
+      obatom->SetId(id);
+      _atomIds[id] = obatom;
+    } else {
+      obatom->SetId(_atomIds.size());
+      _atomIds.push_back(obatom);
+    }
+
 
 
 #define OBAtomIncrement 100
@@ -1819,6 +1876,7 @@ namespace OpenBabel
 
       }
 
+    _atomIds[atom->GetId()] = (OBAtom*)NULL;
     _vatom.erase(_vatom.begin()+(atom->GetIdx()-1));
     _natoms--;
 
@@ -2615,6 +2673,7 @@ namespace OpenBabel
     for (j = vdb.begin();j != vdb.end();++j)
       DeleteBond((OBBond *)*j); //delete bonds
 
+    _atomIds[atom->GetId()] = (OBAtom*)NULL;
     _vatom.erase(_vatom.begin()+(atom->GetIdx()-1));
     _natoms--;
 
@@ -2904,6 +2963,7 @@ namespace OpenBabel
     _totalCharge = 0;
     _dimension = 3;
     _vatom.clear();
+    _atomIds.clear();
     _vbond.clear();
     _vdata.clear();
     _title = "";
@@ -2922,6 +2982,7 @@ namespace OpenBabel
     _totalCharge = 0;
     _dimension = 3;
     _vatom.clear();
+    _atomIds.clear();
     _vbond.clear();
     _vdata.clear();
     _title = "";
