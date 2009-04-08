@@ -26,7 +26,7 @@ GNU General Public License for more details.
 #include <openbabel/builder.h>
 #include <openbabel/math/matrix3x3.h>
 
-#include <openbabel/stereo/tetrahedral.h>
+//#include <openbabel/stereo/tetrahedral.h>
 
 #include <sstream>
 #include <set>
@@ -1259,6 +1259,7 @@ namespace OpenBabel
         GetAtom(atom->GetIdx())->SetData(pCopiedData);
       }
     }
+    /*
     FOR_ATOMS_OF_MOL (atom, src) {
       if (atom->HasData(OBGenericDataType::StereoData)) {
         OBTetrahedralStereo* cd = (OBTetrahedralStereo*) atom->GetData(OBGenericDataType::StereoData);
@@ -1266,6 +1267,7 @@ namespace OpenBabel
         GetAtom(atom->GetIdx())->SetData(pCopiedData);
       }
     }
+    */
  
     return(*this);
   }
@@ -1612,20 +1614,19 @@ namespace OpenBabel
     obatom->SetIdx(_natoms+1);
     obatom->SetParent(this);
 
+    /*
     if (id >= _atomIds.size()) {
       unsigned int size = _atomIds.size();
-      _atomIds.resize(id+1);
       for (unsigned long i = size; i < id; ++i)
-        _atomIds[i] = (OBAtom*)NULL;
+        _atomIds.push_back((OBAtom*)NULL);
       obatom->SetId(id);
-      _atomIds[id] = obatom;
+      _atomIds.push_back(obatom); // _atomIds[id]
     } else {
+    */
       obatom->SetId(_atomIds.size());
       _atomIds.push_back(obatom);
-    }
-
-
-
+    //}
+    
 #define OBAtomIncrement 100
 
     if (_vatom.empty() || _natoms+1 >= (signed)_vatom.size())
@@ -1639,7 +1640,7 @@ namespace OpenBabel
 
     _vatom[_natoms] = (OBAtom*)obatom;
     _natoms++;
-
+    
     if (HasData(OBGenericDataType::VirtualBondData))
       {
         /*add bonds that have been queued*/
