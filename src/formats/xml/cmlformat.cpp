@@ -575,10 +575,11 @@ namespace OpenBabel
                 vector<string> ids;
                 tokenize(ids,value);
                 // Have 4 atoms defining the parity
-                // but don't currently use them TODO
+                // but don't currently use them @todo
                 //Simply use parity as given to set clockwise/anticlockwise
 
                 attrname = (++AttributeIter)->first;
+                /* @todo
                 if(attrname=="parity")
                   {
                     value = AttributeIter->second;
@@ -586,6 +587,7 @@ namespace OpenBabel
                     if(parity>0) pAtom->SetClockwiseStereo();
                     if(parity<0) pAtom->SetAntiClockwiseStereo();
                   }
+                  */
               }
 
             else if(attrname=="radical") //Marvin extension
@@ -763,10 +765,12 @@ namespace OpenBabel
                 OBAtom* patom = _pmol->GetAtom(Idx);
                 if(!patom)
                   return false;
+                /* @todo
                 if(parity>0)
                   patom->SetClockwiseStereo();
                 else if(parity<0)
                   patom->SetAntiClockwiseStereo();
+                */
                 OBChiralData* cd = new OBChiralData;
                 cd->Clear();
                 cd->SetAtom4Refs(AtomRefIdx, input);
@@ -1267,8 +1271,10 @@ namespace OpenBabel
             bool anyChg=false, anySpin=false, anyIsotope=false;
             double X, Y, Z; //atom coordinates
 
+            /* @todo
             if(mol.GetDimension()!=3)
               mol.FindChiralCenters();
+            */
 
             OBAtom *patom;
             vector<OBAtom*>::iterator i;
@@ -1353,6 +1359,7 @@ namespace OpenBabel
                             xmlTextWriterWriteFormatAttribute(writer(), C_Z3orFRACT,"%f", Z);
                           }
                         int cfg=0;
+                        /* @todo
                         if((patom->IsPositiveStereo() || patom->IsClockwise()))
                           cfg=1;
                         else if(patom->IsNegativeStereo() || patom->IsAntiClockwise())
@@ -1375,6 +1382,7 @@ namespace OpenBabel
                                 xmlTextWriterEndElement(writer());//atomParity
                               }
                           }
+                          */
                       }
                     else
                       {

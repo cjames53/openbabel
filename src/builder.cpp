@@ -700,8 +700,10 @@ namespace OpenBabel
 
   }
 
+  // @todo
   void OBBuilder::CorrectStereoAtoms(OBMol &mol)
   {
+    /*
     FOR_ATOMS_OF_MOL (center, mol) {
       if (center->HasData(OBGenericDataType::ChiralData)) {
         OBChiralData *cd = (OBChiralData*) center->GetData(OBGenericDataType::ChiralData);
@@ -742,7 +744,7 @@ namespace OpenBabel
 
       } // HasData
     } // FOR_ATOMS_OF_MOL
-
+*/
   }
 
 } // end namespace OpenBabel

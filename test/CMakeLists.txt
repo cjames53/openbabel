@@ -33,6 +33,32 @@ endforeach(test ${tests})
 
 set(old_tests
     aromatest
+    atom
+    bond
+    cansmi
+    cmlreadfile
+    conversion
+    data
+    ffghemical
+    ffmmff94
+    ffuff
+    formalcharge
+    format
+    formula
+#    inchiwrite
+    internalcoord
+    invalidsmarts
+    invalidsmiles
+    iterators
+    logp_psa
+    math
+    mol
+    phmodel
+    residue
+    ringtest
+    smartstest
+    smilesmatch
+    unitcell
    )
                 
 
