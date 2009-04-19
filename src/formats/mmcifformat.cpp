@@ -830,7 +830,7 @@ namespace OpenBabel
         id.append(1, (char)toupper(* p));
     if (id.empty())
       {
-      snprintf(buffer, BUFF_SIZE, "T%d", time(0));
+      snprintf(buffer, BUFF_SIZE, "T%d", static_cast<int>(time(0)));
       id.assign(buffer);
       }
     ofs << "# --------------------------------------------------------------------------" << endl;
