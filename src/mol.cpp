@@ -2103,7 +2103,23 @@ namespace OpenBabel
 
               }
 
-            AddBond(atom->GetIdx(),h->GetIdx(),1);
+            int bondFlags = 0;
+            // OBBuilder::GetNewBondVec checked to make sure the new bond is
+            // next to a wedge/hash if present, now we still need to set the 
+            // bond flag.
+            if (GetDimension() == 2) {
+              OBStereoFacade stereoFacade(this);
+              if (stereoFacade.HasTetrahedralStereo(atom->GetId())) {
+                OBBondIterator i;
+                for (OBBond *bond = atom->BeginBond(i); bond; bond = atom->NextBond(i)) 
+                  if (bond->IsWedge())
+                    bondFlags = OB_HASH_BOND;
+                  else if (bond->IsHash())
+                    bondFlags = OB_WEDGE_BOND;
+              }
+            }
+
+            AddBond(atom->GetIdx(),h->GetIdx(),1, bondFlags);
             h->SetCoordPtr(&_c);
           }
       }
@@ -2189,7 +2205,24 @@ namespace OpenBabel
             h = NewAtom();
             h->SetType("H");
             h->SetAtomicNum(1);
-            AddBond(atom->GetIdx(),h->GetIdx(),1);
+
+            int bondFlags = 0;
+            // OBBuilder::GetNewBondVec checked to make sure the new bond is
+            // next to a wedge/hash if present, now we still need to set the 
+            // bond flag.
+            if (GetDimension() == 2) {
+              OBStereoFacade stereoFacade(this);
+              if (stereoFacade.HasTetrahedralStereo(atom->GetId())) {
+                OBBondIterator i;
+                for (OBBond *bond = atom->BeginBond(i); bond; bond = atom->NextBond(i)) 
+                  if (bond->IsWedge())
+                    bondFlags = OB_HASH_BOND;
+                  else if (bond->IsHash())
+                    bondFlags = OB_WEDGE_BOND;
+              }
+            }
+
+            AddBond(atom->GetIdx(),h->GetIdx(),1, bondFlags);
             h->SetCoordPtr(&_c);
           }
       }

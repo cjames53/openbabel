@@ -31,6 +31,9 @@ GNU General Public License for more details.
 #include <openbabel/obconversion.h>
 #include <openbabel/locale.h>
 
+
+#include <openbabel/stereo/stereo.h>
+
 /* OBBuilder::GetNewBondVector():
  * - is based on OBAtom::GetNewBondVector()
  * - but: when extending a long chain all the bonds are trans
@@ -65,12 +68,12 @@ namespace OpenBabel
   **/
   std::vector<std::pair<OBSmartsPattern*, std::vector<vector3> > > OBBuilder::_fragments;
 
-  bool OBBuilder::LoadFragments()  {
+  void OBBuilder::LoadFragments()  {
     // open data/fragments.txt
     ifstream ifs;
     if (OpenDatafile(ifs, "fragments.txt").length() == 0) {
       obErrorLog.ThrowError(__FUNCTION__, "Cannot open fragments.txt", obError);
-      return false;
+      return;
     }
 
     // Set the locale for number parsing to avoid locale issues: PR#1785463
@@ -109,9 +112,27 @@ namespace OpenBabel
 
     // return the locale to the original one
     obLocale.RestoreLocale();
-    return true;
   }
  
+  vector3 GetCorrectedBondVector(OBAtom *atom1, OBAtom *atom2, int bondOrder = 1)
+  {
+    double bondLength = 0.0;
+
+    // We create an estimate of the bond length based on the two atoms
+    bondLength += etab.CorrectedBondRad(atom1->GetAtomicNum(), atom1->GetHyb());
+    bondLength += etab.CorrectedBondRad(atom2->GetAtomicNum(), atom2->GetHyb());
+
+    // These are based on OBBond::GetEquibLength
+    if (bondOrder == -1) // aromatic
+      bondLength *= 0.93;
+    else if (bondOrder == 2)
+      bondLength *= 0.91;
+    else if (bondOrder == 3)
+      bondLength *= 0.87;
+
+    return OBBuilder::GetNewBondVector(atom1, bondLength);
+  }
+
   vector3 OBBuilder::GetNewBondVector(OBAtom *atom)
   {
     return GetNewBondVector(atom, 1.5);
@@ -127,6 +148,13 @@ namespace OpenBabel
     
     if (atom == NULL)
       return VZero;
+    
+    int dimension = ((OBMol*)atom->GetParent())->GetDimension();
+    
+    if (dimension == 3) {
+      ////////////
+      //   3D   //
+      ////////////
 
     //  
     //  a   --->   a--*
@@ -265,6 +293,160 @@ namespace OpenBabel
       return newbond;
     }
 
+    } else if (dimension == 2) {
+      ////////////
+      //   2D   //
+      ////////////
+      OBBondIterator i;
+      
+      //
+      //  a   --->   a---*
+      //
+      if (atom->GetValence() == 0) {
+        newbond = atom->GetVector() + VX * length;
+        // Check that the vector is still finite before returning
+        if (!isfinite(newbond.x()) || !isfinite(newbond.y()))
+          newbond.Set(0.0, 0.0, 0.0);
+        return newbond;
+      }
+
+      // hyb * = 1                                                                //
+      // ^^^^^^^^^                                                                //
+      //                                                                          //
+      //   (a-1)--a   --->   (a-1)--a--*        angle(a-1, a, *) = 180            //
+      //                                                                          //
+      // hyb * = 2                                                                //
+      // ^^^^^^^^^                                                                //
+      // make sure we place the new atom trans to a-2 (if there is an a-2 atom)   //
+      //                                                                          //
+      //   (a-2)             (a-2)                                                //
+      //     \                 \                                                  //
+      //    (a-1)==a   --->   (a-1)==a          angle(a-1, a, *) = 120            //
+      //                              \                                           //
+      //                               *                                          //
+      // hyb * = 3                                                                //
+      // ^^^^^^^^^                                                                //
+      // make sure we place the new atom trans to a-2 (if there is an a-2 atom)   //
+      //                                                                          //
+      //   (a-2)             (a-2)                                                //
+      //     \                 \                                                  //
+      //    (a-1)--a   --->   (a-1)--a          angle(a-1, a, *) = 109            //
+      //                              \                                           //
+      //                               *                                          //
+      if (atom->GetValence() == 1) {
+        OBAtom *nbr = atom->BeginNbrAtom(i);
+        if (!nbr)
+          return VZero;
+        bond1 = atom->GetVector() - nbr->GetVector(); // bond (a-1)--a
+
+        for (OBAtom *nbr2 = nbr->BeginNbrAtom(i); nbr2; nbr2 = nbr->NextNbrAtom(i))
+          if (nbr2 != atom)
+            bond2 = nbr->GetVector() - nbr2->GetVector(); // bond (a-2)--(a-1)
+
+        int hyb = atom->GetHyb();
+        if (hyb == 1)
+          newbond = bond1;
+        else if (hyb == 2 || hyb == 3) {
+          matrix3x3 m;
+          m.RotAboutAxisByAngle(VZ, 60.0);
+          newbond = m*bond1;
+        }
+        newbond.normalize();
+        newbond *= length;
+        newbond += atom->GetVector();
+        return newbond;
+      } // GetValence() == 1
+  
+      //                          //
+      //    \         \           //
+      //     X  --->   X--*       //
+      //    /         /           //
+      //                          //
+      if (atom->GetValence() == 2) {
+        for (OBAtom *nbr = atom->BeginNbrAtom(i); nbr; nbr = atom->NextNbrAtom(i)) {
+          if (bond1 == VZero)
+            bond1 = atom->GetVector() - nbr->GetVector();
+          else
+            bond2 = atom->GetVector() - nbr->GetVector();
+        }
+        bond1.normalize();
+        bond2.normalize();
+        newbond = bond1 + bond2;
+        newbond.normalize();
+        newbond *= length;
+        newbond += atom->GetVector();
+        return newbond;
+      }
+
+      //                          //
+      //    \          \          //
+      //   --X  --->  --X--*      //
+      //    /          /          //
+      //                          //
+      if (atom->GetValence() == 3) {
+        OBStereoFacade stereoFacade((OBMol*)atom->GetParent());
+        if (stereoFacade.HasTetrahedralStereo(atom->GetId())) {
+          OBBond *hash = 0;
+          OBBond *wedge = 0;
+          vector<OBBond*> plane;
+          for (OBAtom *nbr = atom->BeginNbrAtom(i); nbr; nbr = atom->NextNbrAtom(i)) {
+            OBBond *bond = atom->GetBond(nbr);
+
+            if (bond->IsWedge()) {
+              if (atom == bond->GetBeginAtom())
+                wedge = bond;
+              else
+                hash = bond;
+            } else 
+            if (bond->IsHash()) {
+              if (atom == bond->GetBeginAtom())
+                hash = bond;
+              else
+                wedge = bond;
+            } else
+              plane.push_back(bond);
+          }
+
+          if (wedge && !plane.empty()) {
+            bond2 = atom->GetVector() - wedge->GetNbrAtom(atom)->GetVector();
+            bond3 = atom->GetVector() - plane[0]->GetNbrAtom(atom)->GetVector();
+          } else if (hash && !plane.empty()) {
+            bond2 = atom->GetVector() - hash->GetNbrAtom(atom)->GetVector();
+            bond3 = atom->GetVector() - plane[0]->GetNbrAtom(atom)->GetVector();
+          } else if (plane.size() >= 2) {
+            bond2 = atom->GetVector() - plane[0]->GetNbrAtom(atom)->GetVector();
+            bond3 = atom->GetVector() - plane[1]->GetNbrAtom(atom)->GetVector();
+          } else if (hash && wedge) {
+            bond2 = atom->GetVector() - wedge->GetNbrAtom(atom)->GetVector();
+            bond3 = atom->GetVector() - hash->GetNbrAtom(atom)->GetVector();
+          }
+        } else {
+          for (OBAtom *nbr = atom->BeginNbrAtom(i); nbr; nbr = atom->NextNbrAtom(i)) {
+            if (bond1 == VZero)
+              bond1 = atom->GetVector() - nbr->GetVector();
+            else if (bond2 == VZero)
+              bond2 = atom->GetVector() - nbr->GetVector();
+            else
+              bond3 = atom->GetVector() - nbr->GetVector();
+          }
+        }
+
+        bond2.normalize();
+        bond3.normalize();
+        newbond = -(bond2 + bond3);
+        newbond.normalize();
+        newbond *= length;
+        newbond += atom->GetVector();
+        return newbond;
+      }
+  
+    } else {
+      ////////////
+      //   0D   //
+      ////////////
+      return VZero;
+    }
+
     return VZero; //previously undefined
   }
   
@@ -272,7 +454,9 @@ namespace OpenBabel
   // fragment and the fragment itself. The fragment containing b will be 
   // rotated and translated. Atom a is the atom from 
   // the main molecule to which we want to connect atom b.
-  bool OBBuilder::Connect(OBMol &mol, int idxA, int idxB, vector3 &newpos, int bondOrder)
+  // NOTE: newpos now uses CorrectedBondVector, so we don't do that below
+  bool OBBuilder::Connect(OBMol &mol, int idxA, int idxB, 
+      vector3 &newpos, int bondOrder)
   {
     OBAtom *a = mol.GetAtom(idxA);
     OBAtom *b = mol.GetAtom(idxB);
@@ -385,7 +569,7 @@ namespace OpenBabel
 
   bool OBBuilder::Connect(OBMol &mol, int idxA, int idxB, int bondOrder)
   {
-    vector3 newpos = GetNewBondVector(mol.GetAtom(idxA));
+    vector3 newpos = GetCorrectedBondVector(mol.GetAtom(idxA), mol.GetAtom(idxB), bondOrder);
     return Connect(mol, idxA, idxB, newpos, bondOrder);
   }
 
@@ -503,6 +687,7 @@ namespace OpenBabel
     OBMol workMol = mol;
     
     // delete all bonds in the working molecule
+    // we will add them back at the end
     while (workMol.NumBonds())
       workMol.DeleteBond(workMol.GetBond(0));
     
@@ -510,8 +695,7 @@ namespace OpenBabel
 
     //datafile is read only on first use of Build()
     if(_fragments.empty())
-      if(!LoadFragments())
-        return false;
+      LoadFragments();
 
     // Loop through  the database once and assign the coordinates from
     // the first (most complex) fragment.
@@ -537,7 +721,7 @@ namespace OpenBabel
             atom->SetVector(i->second[counter]);
             counter++;
           }
-            
+
           // add the bonds for the fragment
           for (k = j->begin(); k != j->end(); ++k) {
             index = *k;
@@ -588,7 +772,13 @@ namespace OpenBabel
    
       // get the position for the new atom, this is done with GetNewBondVector
       if (prev != NULL) {
-        molvec = GetNewBondVector(workMol.GetAtom(prev->GetIdx()));
+        int bondType = a->GetBond(prev)->GetBO();
+        if (a->GetBond(prev)->IsAromatic())
+          bondType = -1;
+
+        molvec = GetCorrectedBondVector(workMol.GetAtom(prev->GetIdx()),
+                                        workMol.GetAtom(a->GetIdx()),
+                                        bondType);
         moldir = molvec - workMol.GetAtom(prev->GetIdx())->GetVector();
       } else {
         molvec = VX;
@@ -607,6 +797,17 @@ namespace OpenBabel
         workMol.AddBond(*bond);
       }
 
+    }
+
+    // Ensure all bonds from the old molecule exist in the new molecule
+    int beginIdx, endIdx;
+    FOR_BONDS_OF_MOL(b, mol) {
+      beginIdx = b->GetBeginAtomIdx();
+      endIdx = b->GetEndAtomIdx();
+      if (!workMol.GetBond(beginIdx, endIdx)) {
+        // We need to duplicate the old bond
+        workMol.AddBond(beginIdx, endIdx, b->GetBO(), b->GetFlags());
+      }
     }
     
     // correct the chirality
