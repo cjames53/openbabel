@@ -68,12 +68,12 @@ namespace OpenBabel
   **/
   std::vector<std::pair<OBSmartsPattern*, std::vector<vector3> > > OBBuilder::_fragments;
 
-  bool OBBuilder::LoadFragments()  {
+  void OBBuilder::LoadFragments()  {
     // open data/fragments.txt
     ifstream ifs;
     if (OpenDatafile(ifs, "fragments.txt").length() == 0) {
       obErrorLog.ThrowError(__FUNCTION__, "Cannot open fragments.txt", obError);
-      return false;
+      return;
     }
 
     // Set the locale for number parsing to avoid locale issues: PR#1785463
@@ -112,9 +112,27 @@ namespace OpenBabel
 
     // return the locale to the original one
     obLocale.RestoreLocale();
-    return true;
   }
  
+  vector3 GetCorrectedBondVector(OBAtom *atom1, OBAtom *atom2, int bondOrder = 1)
+  {
+    double bondLength = 0.0;
+
+    // We create an estimate of the bond length based on the two atoms
+    bondLength += etab.CorrectedBondRad(atom1->GetAtomicNum(), atom1->GetHyb());
+    bondLength += etab.CorrectedBondRad(atom2->GetAtomicNum(), atom2->GetHyb());
+
+    // These are based on OBBond::GetEquibLength
+    if (bondOrder == -1) // aromatic
+      bondLength *= 0.93;
+    else if (bondOrder == 2)
+      bondLength *= 0.91;
+    else if (bondOrder == 3)
+      bondLength *= 0.87;
+
+    return OBBuilder::GetNewBondVector(atom1, bondLength);
+  }
+
   vector3 OBBuilder::GetNewBondVector(OBAtom *atom)
   {
     return GetNewBondVector(atom, 1.5);
@@ -436,7 +454,9 @@ namespace OpenBabel
   // fragment and the fragment itself. The fragment containing b will be 
   // rotated and translated. Atom a is the atom from 
   // the main molecule to which we want to connect atom b.
-  bool OBBuilder::Connect(OBMol &mol, int idxA, int idxB, vector3 &newpos, int bondOrder)
+  // NOTE: newpos now uses CorrectedBondVector, so we don't do that below
+  bool OBBuilder::Connect(OBMol &mol, int idxA, int idxB, 
+      vector3 &newpos, int bondOrder)
   {
     OBAtom *a = mol.GetAtom(idxA);
     OBAtom *b = mol.GetAtom(idxB);
@@ -549,7 +569,7 @@ namespace OpenBabel
 
   bool OBBuilder::Connect(OBMol &mol, int idxA, int idxB, int bondOrder)
   {
-    vector3 newpos = GetNewBondVector(mol.GetAtom(idxA));
+    vector3 newpos = GetCorrectedBondVector(mol.GetAtom(idxA), mol.GetAtom(idxB), bondOrder);
     return Connect(mol, idxA, idxB, newpos, bondOrder);
   }
 
@@ -667,6 +687,7 @@ namespace OpenBabel
     OBMol workMol = mol;
     
     // delete all bonds in the working molecule
+    // we will add them back at the end
     while (workMol.NumBonds())
       workMol.DeleteBond(workMol.GetBond(0));
     
@@ -674,8 +695,7 @@ namespace OpenBabel
 
     //datafile is read only on first use of Build()
     if(_fragments.empty())
-      if(!LoadFragments())
-        return false;
+      LoadFragments();
 
     // Loop through  the database once and assign the coordinates from
     // the first (most complex) fragment.
@@ -701,7 +721,7 @@ namespace OpenBabel
             atom->SetVector(i->second[counter]);
             counter++;
           }
-            
+
           // add the bonds for the fragment
           for (k = j->begin(); k != j->end(); ++k) {
             index = *k;
@@ -752,7 +772,13 @@ namespace OpenBabel
    
       // get the position for the new atom, this is done with GetNewBondVector
       if (prev != NULL) {
-        molvec = GetNewBondVector(workMol.GetAtom(prev->GetIdx()));
+        int bondType = a->GetBond(prev)->GetBO();
+        if (a->GetBond(prev)->IsAromatic())
+          bondType = -1;
+
+        molvec = GetCorrectedBondVector(workMol.GetAtom(prev->GetIdx()),
+                                        workMol.GetAtom(a->GetIdx()),
+                                        bondType);
         moldir = molvec - workMol.GetAtom(prev->GetIdx())->GetVector();
       } else {
         molvec = VX;
@@ -771,6 +797,17 @@ namespace OpenBabel
         workMol.AddBond(*bond);
       }
 
+    }
+
+    // Ensure all bonds from the old molecule exist in the new molecule
+    int beginIdx, endIdx;
+    FOR_BONDS_OF_MOL(b, mol) {
+      beginIdx = b->GetBeginAtomIdx();
+      endIdx = b->GetEndAtomIdx();
+      if (!workMol.GetBond(beginIdx, endIdx)) {
+        // We need to duplicate the old bond
+        workMol.AddBond(beginIdx, endIdx, b->GetBO(), b->GetFlags());
+      }
     }
     
     // correct the chirality
