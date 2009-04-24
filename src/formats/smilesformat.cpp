@@ -662,6 +662,11 @@ namespace OpenBabel {
     if (ChiralSearch != _tetrahedralMap.end() && ChiralSearch->second != NULL)
     {
       int insertpos = NumConnections(ChiralSearch->first) - 2;
+
+      // if the chiral center atom is the first atom in the smiles, decrement 
+      if (_prev == 1)
+        insertpos--;
+
       if (insertpos < 0) {
         if (ChiralSearch->second->from != OBStereo::NoId)
           obErrorLog.ThrowError(__FUNCTION__, "Error: Overwriting previous from reference id.", obError);
@@ -2016,7 +2021,22 @@ namespace OpenBabel {
                << bond->numConnections << " to " << ChiralSearch->second << endl;
            */
           cout << "bond->numConnections = " << bond->numConnections << endl;
-          int insertpos = bond->numConnections - 2;
+          cout << "_prev = " << _prev << endl;
+          cout << "bond->prev = " << bond->prev << endl;
+          int insertpos = bond->numConnections - 1;
+
+          // if the chiral center atom is the first atom in the smiles, decrement 
+          if (bond->prev == 1)
+            insertpos--;
+
+          // if the previous atom has an explicit H, increment numConnections
+          /*
+          OBBondIterator bi;
+          for (OBAtom *nbr = atom->BeginNbrAtom(bi); nbr; nbr = atom->NextNbrAtom(bi))
+            if (nbr->IsHydrogen())
+              insertpos++;
+              */
+
           if (insertpos < 0) {
             if (ChiralSearch->second->from != OBStereo::NoId)
               obErrorLog.ThrowError(__FUNCTION__, "Error: Overwriting previous from reference id.", obError);
@@ -2064,11 +2084,16 @@ namespace OpenBabel {
       if (bond->prev == _prev)
         ringClosure.numConnections++;
 
+    cout << "Adding RingClosureBond..." << endl;
+    cout << "_prev = " << _prev << endl;
+
+    /*
     // if the previous atom has an explicit H, increment numConnections
     OBBondIterator bi;
     for (OBAtom *nbr = atom->BeginNbrAtom(bi); nbr; nbr = atom->NextNbrAtom(bi))
       if (nbr->IsHydrogen())
         ringClosure.numConnections++;
+        */
 
     _rclose.push_back(ringClosure);
     _order = 1;
@@ -2084,9 +2109,11 @@ namespace OpenBabel {
     int val = atom->GetValence();
     int idx = atom->GetIdx();
     vector<RingClosureBond>::iterator bond;
-    for (bond = _rclose.begin(); bond != _rclose.end(); ++bond) //correct for multiple closure bonds to a single atom
+    //correct for multiple closure bonds to a single atom
+    for (bond = _rclose.begin(); bond != _rclose.end(); ++bond) 
       if (bond->prev == idx)
         val++;
+    
     return val;
   }
  
