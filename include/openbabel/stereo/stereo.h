@@ -86,6 +86,64 @@ namespace OpenBabel {
       AntiClockwise = 2  //!< AntiClockiwe winding (or CounterClockwise
     };
 
+    enum StereoBond2DModel {
+      /**
+       * The hash bond in the Classic stereo bond model has it's tip or point in
+       * the plane. The wide end of the hash lies behind the paper/screen.
+       *
+       * A number of combinations is possible:
+       * # 2 plane bonds + 1 hash + 1 wedge
+       * # 2 plane bonds + 1 hash
+       * # 2 plane bonds + 1 wedge
+       * 
+       * TODO: create image.... 
+       */
+     Classic,
+      /**
+       * The hash bond in the Perspective stereo bond model has it's wide end in
+       * the plane. The tip or point of the hash lies behind the paper/screen.
+       *
+       * A number of combinations is possible:
+       * # 2 plane bonds + 1 hash + 1 wedge
+       * # 2 plane bonds + 1 hash
+       * # 2 plane bonds + 1 wedge
+       * 
+       * TODO: create image.... 
+       */
+      Perspective,
+      /**
+       * In the Fisher model, there are 4 bonds which lie in the plane of the 
+       * paper/screen. These bonds are orientated to form a '+'. By convention,
+       * The horizontal bonds lie in front of the plane (wedge bonds) and the 
+       * vertical bonds lie behind the plane (hash bonds).
+       *
+       * A special case of the Fisher model, where there are 2 opposite wedge 
+       * bonds and 2 opposite hash bonds, is also handled by this model. If the
+       * hash/bonds are explicit, they can be oriented (rotated) freely.
+       *
+       * TODO: create image.... 
+       */
+      Fisher,
+      /**
+       * A special case of the Fisher model, where there are 2 opposite wedge 
+       * bonds and 2 opposite hash bonds. If the hash/bonds are explicit, they 
+       * can be oriented (rotated) freely.
+       */
+      ExplicitFisher,
+      /**
+       * Hydrogens are explicit, their bonds lie in the plane. A single hash or 
+       * wedge is used to indicate which heavy atom lies in behind or in front 
+       * of the plane respectively.
+       *
+       * TODO: create image.... 
+       */
+      Pubchem,
+      /**
+       * No2DModel (must always be last)
+       */
+      No2DModel
+    };
+  
     /**
      * Some useful predefined ids. 
      */
