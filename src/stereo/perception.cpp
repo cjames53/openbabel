@@ -629,6 +629,381 @@ namespace OpenBabel {
     return (a.x() - c.x()) * (b.y() - c.y()) - (a.y() - c.y()) * (b.x() - c.x());
   }
 
+  /**
+   * This struct implements the actual conversion:
+   * 
+   * +---------------------------------+
+   * |   2D bond types + coordinates   | (6 BondToNbrTypes)
+   * +---------------------------------+
+   *                |
+   *                | OBStereo::StereoBond2DModel   * Classic 
+   *                |                               * Perspective
+   *                V                               * Fisher
+   * +---------------------------------+            * ExplicitFisher
+   * | InPlane, Foreground, Background |            * Pubchem
+   * +---------------------------------+
+   *                |
+   *                | FillConfig_...()
+   *                | + TriangleSign
+   *                V
+   * +---------------------------------+
+   * |  OBTetrahedralStereo::Config    |
+   * +---------------------------------+
+   *
+   * The BondToNbrType types meaning depends on the OBStereo::StereoBond2DModel
+   * used. To normalize the input, the bond types are converted to only 3 types:
+   */
+  struct Tetrahedral2DCenter
+  {
+    // For the implementation we'll split the bonds into 6 categories.
+    // The biggest problem is how to determine the meaning of a hash 
+    // bond. See OBStereo::BondStereo2DModel.
+    enum BondToNbrType {
+      InPlane,
+      PointAtCenterHash,
+      WideAtCenterHash,
+      PointAtCenterWedge,
+      WideAtCenterWedge,
+      WedgeOrHash
+    };
+
+    Tetrahedral2DCenter(OBAtom *center)
+    {
+      cout << "Tetrahedral2DCenter(" << center << ")" << endl;
+      m_config.center = center->GetId();
+
+      // assign BondToNbrType types
+      FOR_BONDS_OF_ATOM(bond, center) {
+        OBAtom *nbr = bond->GetNbrAtom(center);
+
+        m_nbrs.push_back(nbr);
+        if (bond->IsHash()) {
+          if (bond->GetBeginAtom()->GetId() == center->GetId())
+            m_types.push_back(PointAtCenterHash);
+          else
+            m_types.push_back(WideAtCenterHash);
+        } else
+        if (bond->IsWedge()) {
+          if (bond->GetBeginAtom()->GetId() == center->GetId())
+            m_types.push_back(PointAtCenterWedge);
+          else
+            m_types.push_back(WideAtCenterWedge);
+        } else
+        if (bond->IsWedgeOrHash())
+          m_types.push_back(WedgeOrHash);
+        else
+          m_types.push_back(InPlane);
+      }
+
+      cout << "1" << endl;
+
+      m_model = OBStereo::No2DModel;
+      // setup nType to contain type counts
+      m_nType.resize(OBStereo::No2DModel);
+      m_nType[InPlane] = std::count(m_types.begin(), m_types.end(), InPlane);
+      m_nType[PointAtCenterWedge] = std::count(m_types.begin(), m_types.end(), PointAtCenterWedge);
+      m_nType[PointAtCenterHash] = std::count(m_types.begin(), m_types.end(), PointAtCenterHash);
+      m_nType[WideAtCenterWedge] = std::count(m_types.begin(), m_types.end(), WideAtCenterWedge);
+      m_nType[WideAtCenterHash] = std::count(m_types.begin(), m_types.end(), WideAtCenterHash);
+      m_nType[WedgeOrHash] = std::count(m_types.begin(), m_types.end(), WedgeOrHash);
+      
+      cout << "2" << endl;
+      
+      if (m_nType[InPlane] == 4)
+        m_model = OBStereo::Fisher;
+      else if (m_nType[InPlane] == 3)
+        m_model = OBStereo::Pubchem;
+      else if ((m_nType[PointAtCenterWedge] + m_nType[WideAtCenterWedge] == 2) && 
+               (m_nType[PointAtCenterHash] + m_nType[WideAtCenterHash] == 2))
+        m_model = OBStereo::ExplicitFisher;
+      else if ((m_nType[PointAtCenterWedge] == 1) && (m_nType[WideAtCenterHash] == 1))
+        m_model = OBStereo::Perspective;
+      
+      cout << "3" << endl;
+    }
+    
+    ~Tetrahedral2DCenter()
+    {
+      cout << "~Tetrahedral2DCenter()" << endl;
+    }
+
+    int BondToNbrTypeCount(BondToNbrType type)
+    {
+      return m_nType.at(type);
+    }
+
+    // set the 3 config.refs ids & call TriangleSign to determine config.winding
+    // (set config.from/towards & config.view before this.)
+    // p1, p2 & p3 must be valid atoms!
+    void FillConfig_Triangle(OBAtom *p1, OBAtom *p2, OBAtom *p3)
+    {
+      m_config.refs.resize(3);
+      m_config.refs[0] = p1->GetId();
+      m_config.refs[1] = p2->GetId();
+      m_config.refs[2] = p3->GetId();
+      double sign = TriangleSign(p1->GetVector(), p2->GetVector(), p3->GetVector());
+      if (sign > 0.0)
+        m_config.winding = OBStereo::AntiClockwise;
+    }
+
+    // a3 or a4 can be 0
+    void FillConfig_Specified(OBAtom *plane1, OBAtom *plane2, OBAtom *foreground, OBAtom *background)
+    {
+      if (foreground && background) {
+        m_config.from = foreground->GetId();
+        FillConfig_Triangle(plane1, plane2, background);
+      } else if (foreground) {
+        m_config.towards = OBStereo::ImplicitId;
+        m_config.view = OBStereo::ViewTowards;
+        FillConfig_Triangle(plane1, plane2, foreground);
+      } else if (background) {
+        m_config.from = OBStereo::ImplicitId;
+        FillConfig_Triangle(plane1, plane2, background);
+      } 
+    }
+
+    // Any model, containing at least 1 WedgeOrHash (Curly) bond
+    void FillConfig_Unspecified(OBAtom *a1, OBAtom *a2, OBAtom *a3, OBAtom *a4 = 0)
+    {
+      m_config.from = a1 ? a1->GetId() : OBStereo::ImplicitId;
+      m_config.refs.resize(3);
+      m_config.refs[0] = a2 ? a2->GetId() : OBStereo::ImplicitId;
+      m_config.refs[1] = a3 ? a3->GetId() : OBStereo::ImplicitId;
+      m_config.refs[2] = a4 ? a4->GetId() : OBStereo::ImplicitId;
+    }
+
+    void FillConfig(OBAtom *plane1, OBAtom *plane2, OBAtom *foreground, OBAtom *background)
+    {
+      if (m_config.specified)
+        FillConfig_Specified(plane1, plane2, foreground, background);
+      else 
+        FillConfig_Unspecified(plane1, plane2, foreground, background);
+    }
+
+    // Classic hash: wide end behind plane
+    // 2 plane + wedge + hash
+    // 2 plane + wedge
+    // 2 plane + hash
+    void PerceiveClassic()
+    {
+      cout << "TetrahedralCenter2D::PerceiveClassic" << endl;
+      // find three atoms for the triangle and pick a single atom
+      // as the from/towards atom
+      std::vector<OBAtom*> plane;
+      OBAtom *plane1 = 0;
+      OBAtom *plane2 = 0;
+      OBAtom *foreground = 0;
+      OBAtom *background = 0;
+      for (unsigned int i = 0; i < m_nbrs.size(); ++i) {
+        switch (m_types.at(i)) {
+          case InPlane:
+            plane.push_back(m_nbrs.at(i));
+            break;
+          case PointAtCenterWedge:
+          case WideAtCenterHash:
+            foreground = m_nbrs.at(i);
+            break;
+          case PointAtCenterHash:
+          case WideAtCenterWedge:
+            background = m_nbrs.at(i);
+            break;
+          default:
+          case WedgeOrHash:
+            m_config.specified = false;
+            break;
+        }
+      }
+      
+      FillConfig(plane1, plane2, foreground, background);
+    }
+
+    // Perspective hash: pointy end behind plane
+    // 2 plane + wedge + hash
+    // 2 plane + wedge
+    // 2 plane + hash
+    void PerceivePerspective()
+    {
+      cout << "TetrahedralCenter2D::PerceivePerspective" << endl;
+      // find three atoms for the triangle and pick a single atom
+      // as the from/towards atom
+      std::vector<OBAtom*> plane;
+      OBAtom *plane2 = 0;
+      OBAtom *foreground = 0;
+      OBAtom *background = 0;
+      for (unsigned int i = 0; i < m_nbrs.size(); ++i) {
+        switch (m_types.at(i)) {
+          case InPlane:
+            plane.push_back(m_nbrs.at(i));
+            break;
+          case PointAtCenterWedge:
+          case PointAtCenterHash:
+            foreground = m_nbrs.at(i);
+            break;
+          case WideAtCenterHash:
+          case WideAtCenterWedge:
+            background = m_nbrs.at(i);
+            break;
+          default:
+          case WedgeOrHash:
+            m_config.specified = false;
+            break;
+        }
+      }
+      
+      FillConfig(plane.at(0), plane.at(1), foreground, background);
+    }
+
+    // Fisher '+' (all in plane)
+    void PerceiveFisher()
+    {
+      cout << "TetrahedralCenter2D::PerceiveFisher" << endl;
+      // find three atoms for the triangle and pick a single atom
+      // as the from/towards atom
+      OBAtom *left, *right, *top, *bottom;
+      left = right = top = bottom = m_nbrs.at(0);
+      vector3 vleft, vright, vtop, vbottom;
+      vleft = vright = vtop = vbottom = m_nbrs.at(0)->GetVector();
+      for (unsigned int i = 1; i < m_nbrs.size(); ++i) {
+        vector3 vnbr = m_nbrs.at(i)->GetVector();
+        
+        if (vnbr.x() < vleft.x()) {
+          left = m_nbrs.at(i);
+          vleft = left->GetVector();
+        }
+        if (vnbr.x() > vright.x()) {
+          right = m_nbrs.at(i);
+          vright = right->GetVector();
+        }
+        if (vnbr.y() > vtop.y()) {
+          top = m_nbrs.at(i);
+          vtop = top->GetVector();
+        }
+        if (vnbr.y() < vbottom.x()) {
+          bottom = m_nbrs.at(i);
+          vbottom = bottom->GetVector();
+        }
+      }
+
+      // TODO: check orientation + (x has no meaning...)
+
+      // left & right = foreground
+      // top & bottom = background
+      // --> rotate so that 1 hash & 1 wedge become in plane
+      // --> remaining hash is background
+      // --> remaining wedge is foreground
+      FillConfig(left, bottom, right, top);
+    }
+
+    // ExplicitFisher: 
+    // 2 opposite wedges + 2 opposite hashes
+    void PerceiveExplicitFisher()
+    {
+      cout << "TetrahedralCenter2D::PerceiveExplicitFisher" << endl;
+      // find three atoms for the triangle and pick a single atom
+      // as the from/towards atom
+      std::vector<OBAtom*> wedges;
+      std::vector<OBAtom*> hashes;
+      for (unsigned int i = 0; i < m_nbrs.size(); ++i) {
+        switch (m_types.at(i)) {
+          case PointAtCenterHash:
+          case WideAtCenterHash:
+            hashes.push_back(m_nbrs.at(i));
+            break;
+          case PointAtCenterWedge:
+          case WideAtCenterWedge:
+            wedges.push_back(m_nbrs.at(i));
+            break;
+          default:
+            break;
+        }
+      }
+      
+      FillConfig(wedges.at(0), hashes.at(0), wedges.at(1), hashes.at(1));
+    }
+   
+    // Pubchem: (uses Classic hash bonds) 
+    // 3 plane + wedge
+    // 3 plane + hash
+    // 2 plane + wedge
+    // 2 plane + hash
+    void PerceivePubchem()
+    {
+      cout << "TetrahedralCenter2D::PerceivePubchem" << endl;
+      // find three atoms for the triangle and pick a single atom
+      // as the from/towards atom
+      std::vector<OBAtom*> plane;
+      OBAtom *foreground = 0;
+      OBAtom *background = 0;
+      for (unsigned int i = 0; i < m_nbrs.size(); ++i) {
+        switch (m_types.at(i)) {
+          case InPlane:
+            plane.push_back(m_nbrs.at(i));
+            break;
+          case PointAtCenterWedge:
+          case WideAtCenterHash:
+            foreground = m_nbrs.at(i);
+            break;
+          case PointAtCenterHash:
+          case WideAtCenterWedge:
+            background = m_nbrs.at(i);
+            break;
+          default:
+          case WedgeOrHash:
+            m_config.specified = false;
+            break;
+        }
+      }
+      
+      switch (plane.size()) {
+        case 2:
+          FillConfig(plane.at(0), plane.at(1), foreground, background);
+          break;
+        case 3:
+          if (foreground)
+            FillConfig(plane.at(0), plane.at(1), foreground, plane.at(2));
+          else
+            FillConfig(plane.at(0), plane.at(1), plane.at(2), background);
+          break;
+        default:
+          break;
+      }
+    }
+
+    void Perceive(OBStereo::StereoBond2DModel forceModel = OBStereo::No2DModel)
+    {
+      if (forceModel != OBStereo::No2DModel)
+        m_model = forceModel;
+   
+      cout << "TetrahedralCenter2D::Perceive" << endl;
+
+      switch (m_model) {
+        default:
+        case OBStereo::Classic:
+          PerceiveClassic();
+          break;
+        case OBStereo::Perspective:
+          PerceivePerspective();
+          break;
+        case OBStereo::Fisher:
+          PerceiveFisher();
+          break;
+        case OBStereo::ExplicitFisher:
+          PerceiveExplicitFisher();
+          break;
+        case OBStereo::Pubchem:
+          PerceivePubchem();
+          break;
+      }
+    }
+
+    std::vector<OBAtom*>        m_nbrs; // nbr atoms
+    std::vector<BondToNbrType>  m_types; // bond types
+    std::vector<int>            m_nType; // type count for eacht type
+    OBTetrahedralStereo::Config m_config; // the config struct
+    OBStereo::StereoBond2DModel m_model; // the model
+  };
+
+
   std::vector<OBTetrahedralStereo*> TetrahedralFrom2D(OBMol *mol, 
       const std::vector<unsigned int> symClasses, bool addToMol)
   {
@@ -641,10 +1016,16 @@ namespace OpenBabel {
  
     // find all tetrahedral centers
     std::vector<unsigned long> centers = FindTetrahedralAtoms(mol, symClasses);
-      
+    std::vector<Tetrahedral2DCenter> centers2D;
+    
+    cout << "OpenBabel::TetrahedralFrom2D" << endl;
+    
+    bool usePerspectiveHash = false;
     std::vector<unsigned long>::iterator i;
     for (i = centers.begin(); i != centers.end(); ++i) {
+      cout << "loop..." << endl;
       OBAtom *center = mol->GetAtomById(*i);
+      cout << "center = " << center << endl;
  
       // make sure we have at least 3 heavy atom neighbors
       if (center->GetHvyValence() < 3) {
@@ -654,7 +1035,45 @@ namespace OpenBabel {
         obErrorLog.ThrowError(__FUNCTION__, errorMsg.str(), obInfo);
         continue;
       }
-        
+
+      cout << "about to add..." << endl;
+      //centers2D.push_back(Tetrahedral2DCenter(center));
+      //centers2D.push_back(Tetrahedral2DCenter(center));
+      Tetrahedral2DCenter tmp(center);
+      if (tmp.m_model == OBStereo::Perspective)
+        usePerspectiveHash = true;
+
+
+      //centers2D.push_back(tmp);
+   
+      cout << "added..." << endl;
+      cout << "size = " << centers2D.size() << endl;
+
+      cout << "aaaa" << endl;
+    }
+    cout << "1" << endl;
+
+    std::vector<Tetrahedral2DCenter>::iterator center2D;
+    for (center2D = centers2D.begin(); center2D != centers2D.end(); ++center2D) {
+      if (center2D->m_model == OBStereo::No2DModel)
+        center2D->m_model = usePerspectiveHash ? OBStereo::Perspective : OBStereo::Classic;
+
+      center2D->Perceive();
+      
+      OBTetrahedralStereo *th = new OBTetrahedralStereo(mol);
+      th->SetConfig(center2D->m_config);
+
+      configs.push_back(th);
+      // add the data to the molecule if needed
+      if (addToMol)
+        mol->SetData(th);
+    }
+   
+    return configs;
+  }
+
+      
+      /*
       OBTetrahedralStereo::Config config;
       config.center = *i;
         
@@ -671,6 +1090,7 @@ namespace OpenBabel {
             // this is a 'real' hash bond going from center to nbr
             if (hash) {
               // we already have a 'real' hash
+              plane.clear();
               plane1 = plane2 = hash = wedge = 0;
               break;              
             }
@@ -679,6 +1099,7 @@ namespace OpenBabel {
             // this is an 'inverted' hash bond going from nbr to center
             if (wedge) {
               // we already have a 'real' wedge
+              plane.clear();
               plane1 = plane2 = hash = wedge = 0;
               break;              
             }
@@ -691,6 +1112,7 @@ namespace OpenBabel {
             // this is a 'real' wedge bond going from center to nbr
             if (wedge) {
               // we already have a 'real' hash
+              plane.clear();
               plane1 = plane2 = hash = wedge = 0;
               break;              
             }
@@ -699,6 +1121,7 @@ namespace OpenBabel {
             // this is an 'inverted' hash bond going from nbr to center
             if (hash) {
               // we already have a 'real' wedge
+              plane.clear();
               plane1 = plane2 = hash = wedge = 0;
               break;              
             }
@@ -714,10 +1137,12 @@ namespace OpenBabel {
             plane1 = nbr;
           } else if (!plane2) {
             plane2 = nbr;
+          } else if (!plane3) {
+            plane3 = nbr;
           } else {
             std::stringstream errorMsg;
             errorMsg << "Symmetry analysis found atom with id " << center->GetId() 
-                     << " to be a tetrahedral atom but there are at least 3 in"
+                     << " to be a tetrahedral atom but there are 4 in"
                      << " plane bonds in the 2D depiction."
                      << std::endl;
             obErrorLog.ThrowError(__FUNCTION__, errorMsg.str(), obError);
@@ -725,6 +1150,34 @@ namespace OpenBabel {
           }
         }
       }
+
+      if (plane.size() == 4) {
+        std::stringstream errorMsg;
+        errorMsg << "Symmetry analysis found atom with id " << center->GetId() 
+          << " to be a tetrahedral atom but there are 4 in"
+          << " plane bonds in the 2D depiction."
+          << std::endl;
+        obErrorLog.ThrowError(__FUNCTION__, errorMsg.str(), obError);
+      } else
+      if (plane.size() == 3) {
+        // Pubchem format: 
+        // * tetrahedral centers have explicit hydrogens
+        // * the hydrogen is in the paper/screen plane
+        // * a single hash/wedge is used to indicate which atom
+        //   lies below/above the plane
+        std::vector<OBAtom*>::iterator ai;
+        for (ai = plane.begin(); ai != plane.end(); ++ai) {
+          if (ai->IsHydrogen()) {
+            if (hash)
+              wedge = *ai;
+            else if (wedge
+          }
+        }
+
+      } else {
+        if 
+      }
+      
       
       using namespace std;
       if (!config.specified) {
@@ -778,8 +1231,9 @@ namespace OpenBabel {
         continue;
       }
 
+    for (center2D = centers2D.begin(); center2D != centers2D.end(); ++center2D) {
       OBTetrahedralStereo *th = new OBTetrahedralStereo(mol);
-      th->SetConfig(config);
+      th->SetConfig(center2D->config);
 
       configs.push_back(th);
       // add the data to the molecule if needed
@@ -789,6 +1243,7 @@ namespace OpenBabel {
    
     return configs;
   }
+      */
 
   std::vector<OBCisTransStereo*> CisTransFrom2D(OBMol *mol, 
       const std::vector<unsigned int> &symClasses, bool addToMol)
@@ -866,6 +1321,7 @@ namespace OpenBabel {
 
     return configs;
   }
+  
   void CisTransFromUpDown(OBMol *mol, const std::vector<unsigned long> &ctbonds,
     std::map<OBBond*, OBStereo::BondDirection> *updown)
   {
